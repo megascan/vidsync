@@ -110,6 +110,14 @@ let ffmpegInfo: FfmpegStatus | null = null;
 let prepareStatus = "";
 /** Avoid full DOM rebuild while video is playing (reparent = flicker). */
 let roomShellReady = false;
+/** Follower: waiting for HTTP buffer before chasing host (remote peers). */
+let followerBuffering = false;
+/** Seconds of media we want buffered ahead before playing. */
+const FOLLOWER_MIN_BUFFER_SEC = 4;
+/** Only hard-seek if farther than this from host timeline. */
+const FOLLOWER_HARD_DRIFT_SEC = 4;
+/** Soft catch-up rate tweak band. */
+const FOLLOWER_SOFT_DRIFT_SEC = 1.5;
 let clockOffsetMs = 0;
 let applyingRemote = false;
 let lastVersion = -1;
@@ -188,6 +196,138 @@ function hasMedia(): boolean {
   return Boolean(playback?.videoUrl);
 }
 
+/** How many seconds are buffered ahead of `t` (0 if not in a range). */
+function bufferedAheadFrom(t: number): number {
+  try {
+    const b = video.buffered;
+    for (let i = 0; i < b.length; i++) {
+      const start = b.start(i);
+      const end = b.end(i);
+      if (t >= start - 0.35 && t <= end + 0.05) {
+        return Math.max(0, end - t);
+      }
+    }
+  } catch {
+    /* WebKit throws if not ready */
+  }
+  return 0;
+}
+
+function timeIsBuffered(t: number): boolean {
+  return bufferedAheadFrom(t) > 0.25;
+}
+
+/**
+ * Follower sync: buffer first, then play. Do NOT thrash seeks to host "live"
+ * edge on slow WAN — that is the remote flicker (local looks fine: instant buffer).
+ */
+async function syncFollowerPlayback(
+  state: PlaybackState,
+  gen: number,
+  needLoad: boolean,
+): Promise<void> {
+  const hostPlaying = state.isPlaying;
+  const targetSec = expectedPos(state) / 1000;
+  if (!Number.isFinite(targetSec)) return;
+
+  const now = video.currentTime || 0;
+  const drift = targetSec - now; // + = behind host
+  const ahead = bufferedAheadFrom(now);
+
+  // Not enough media yet — wait; never force play into an empty buffer
+  if (ahead < FOLLOWER_MIN_BUFFER_SEC * 0.5 && video.readyState < 3) {
+    followerBuffering = true;
+    try {
+      video.pause();
+    } catch {
+      /* */
+    }
+    if (prepareStatus === "" || prepareStatus.startsWith("Buffering")) {
+      prepareStatus = "Buffering stream…";
+      softPaintRoom();
+    }
+    return;
+  }
+
+  // Hard seek only when far off AND the target (or near it) can be served
+  const far = Math.abs(drift) >= FOLLOWER_HARD_DRIFT_SEC;
+  if (needLoad || far) {
+    const seekTo = targetSec;
+    // Prefer seeking into already-buffered ranges to avoid Range thrash
+    let t = seekTo;
+    if (!timeIsBuffered(seekTo)) {
+      // Jump to latest buffered end behind host if we have any buffer
+      try {
+        const b = video.buffered;
+        if (b.length > 0) {
+          const end = b.end(b.length - 1);
+          // Stay at least 1s behind buffer end so we keep ahead-room
+          t = Math.max(0, Math.min(seekTo, end - 1));
+        }
+      } catch {
+        t = seekTo;
+      }
+    }
+    if (Math.abs((video.currentTime || 0) - t) > 0.5) {
+      await safeSeek(t, gen);
+      if (gen !== applyGen) return;
+    }
+  } else if (Math.abs(drift) >= FOLLOWER_SOFT_DRIFT_SEC && ahead > 2) {
+    // Gentle rate catch-up instead of seek
+    try {
+      video.playbackRate = drift > 0 ? 1.06 : 0.94;
+    } catch {
+      /* */
+    }
+  } else {
+    try {
+      if (video.playbackRate !== 1) video.playbackRate = 1;
+    } catch {
+      /* */
+    }
+  }
+
+  const aheadNow = bufferedAheadFrom(video.currentTime || 0);
+  if (!hostPlaying) {
+    followerBuffering = false;
+    prepareStatus = prepareStatus.startsWith("Buffering") ? "" : prepareStatus;
+    if (!video.paused) {
+      try {
+        video.pause();
+      } catch {
+        /* */
+      }
+    }
+    return;
+  }
+
+  // Host playing: only play when we have a comfortable buffer ahead
+  if (aheadNow < FOLLOWER_MIN_BUFFER_SEC) {
+    followerBuffering = true;
+    prepareStatus = `Buffering… ${aheadNow.toFixed(1)}s`;
+    softPaintRoom();
+    if (!video.paused && aheadNow < 1) {
+      try {
+        video.pause();
+      } catch {
+        /* */
+      }
+    }
+    // If we have a little buffer, keep playing to avoid stop-start thrash
+    if (aheadNow >= 1.5 && video.paused) {
+      await safePlay();
+    }
+    return;
+  }
+
+  followerBuffering = false;
+  if (prepareStatus.startsWith("Buffering")) {
+    prepareStatus = "";
+    softPaintRoom();
+  }
+  if (video.paused) await safePlay();
+}
+
 async function applyState(state: PlaybackState, force: boolean) {
   const gen = ++applyGen;
   const prevUrl = playback?.videoUrl ?? null;
@@ -203,7 +343,6 @@ async function applyState(state: PlaybackState, force: boolean) {
   lastVersion = ver;
 
   // Host drives local file element — never yank src/seek from own heartbeats
-  // (was a major flicker source when state broadcast every ~4s).
   const drive = (!isHost && Boolean(state.videoUrl)) || force || urlChanged;
 
   if (drive && state.videoUrl) {
@@ -211,27 +350,33 @@ async function applyState(state: PlaybackState, force: boolean) {
     try {
       ensureVideoMounted();
       const needLoad =
-        urlChanged ||
-        force ||
-        !videoHasUrl(state.videoUrl);
+        urlChanged || force || !videoHasUrl(state.videoUrl);
       if (needLoad) {
+        // Start from ~host position once, then let progressive download buffer forward
         await loadVideoSrc(state.videoUrl);
         if (gen !== applyGen) return;
+        const targetSec = expectedPos(state) / 1000;
+        if (Number.isFinite(targetSec) && targetSec > 1) {
+          // Initial seek — browser will Range-request; then we wait for buffer
+          await safeSeek(targetSec, gen);
+          if (gen !== applyGen) return;
+        }
       }
-      // Only hard-seek on big drift — small corrections every heartbeat = flicker
-      const targetSec = expectedPos(state) / 1000;
-      const drift = Math.abs((video.currentTime || 0) - targetSec);
-      if (needLoad || drift > 1.25) {
-        await safeSeek(targetSec, gen);
-        if (gen !== applyGen) return;
-      }
-      if (state.isPlaying) {
-        if (video.paused) await safePlay();
-      } else if (!video.paused) {
-        try {
-          video.pause();
-        } catch {
-          /* WebKit */
+      if (!isHost) {
+        await syncFollowerPlayback(state, gen, needLoad);
+      } else {
+        // Host path when force/urlChanged (e.g. after open)
+        const targetSec = expectedPos(state) / 1000;
+        if (needLoad && Number.isFinite(targetSec)) {
+          await safeSeek(targetSec, gen);
+        }
+        if (state.isPlaying) await safePlay();
+        else {
+          try {
+            video.pause();
+          } catch {
+            /* */
+          }
         }
       }
     } catch (e) {
@@ -251,6 +396,7 @@ async function applyState(state: PlaybackState, force: boolean) {
     }
   } else if (drive && !state.videoUrl) {
     applyingRemote = true;
+    followerBuffering = false;
     try {
       video.pause();
       video.removeAttribute("src");
@@ -263,7 +409,6 @@ async function applyState(state: PlaybackState, force: boolean) {
   }
 
   if (gen !== applyGen) return;
-  // Full paint only when URL / layout-relevant fields change
   if (urlChanged || force || prevPlaying === undefined) {
     paint();
   } else {
@@ -327,13 +472,19 @@ async function loadVideoSrc(url: string): Promise<void> {
   } catch {
     /* */
   }
-  // Clear previous resource fully before assigning a new host URL
   video.removeAttribute("src");
   while (video.firstChild) video.removeChild(video.firstChild);
   video.load();
 
+  // Aggressively prefer buffering — remote peers need a real download cushion
   video.preload = "auto";
-  // Prefer <source type="…"> so WebKit can pick a pipeline without sniffing only
+  try {
+    (video as HTMLVideoElement & { preservesPitch?: boolean }).preservesPitch =
+      true;
+  } catch {
+    /* */
+  }
+
   const source = document.createElement("source");
   source.src = url;
   const ext = (() => {
@@ -359,6 +510,7 @@ async function loadVideoSrc(url: string): Promise<void> {
       settled = true;
       video.removeEventListener("loadedmetadata", ok);
       video.removeEventListener("loadeddata", ok);
+      video.removeEventListener("canplay", ok);
       video.removeEventListener("error", bad);
       resolve();
     };
@@ -367,25 +519,27 @@ async function loadVideoSrc(url: string): Promise<void> {
       settled = true;
       video.removeEventListener("loadedmetadata", ok);
       video.removeEventListener("loadeddata", ok);
+      video.removeEventListener("canplay", ok);
       video.removeEventListener("error", bad);
       reject(new Error(mediaErrorMessage()));
     };
     video.addEventListener("loadedmetadata", ok, { once: true });
     video.addEventListener("loadeddata", ok, { once: true });
+    video.addEventListener("canplay", ok, { once: true });
     video.addEventListener("error", bad, { once: true });
-    // source element errors bubble to video
     source.addEventListener("error", bad, { once: true });
     window.setTimeout(() => {
       if (!settled) {
         settled = true;
-        // Timeout without metadata — still resolve so UI can show soft error via play fail
         if (video.readyState < 1) {
-          reject(new Error("Timed out loading stream (host unreachable or blocked)"));
+          reject(
+            new Error("Timed out loading stream (host unreachable or blocked)"),
+          );
         } else {
           resolve();
         }
       }
-    }, 12000);
+    }, 20000);
   });
 }
 
@@ -455,8 +609,7 @@ function wireVideoHostEvents() {
   };
 }
 
-// Host keepalive every 5s while in room (playing OR paused). Server uses this
-// as proof of life — room only dies after HOST_STALE_MS without host packets.
+// Host keepalive every 5s while in room (playing OR paused).
 setInterval(() => {
   if (screen !== "room") return;
 
@@ -468,25 +621,40 @@ setInterval(() => {
     return;
   }
 
+  // Follower: buffer-aware tick (no blind seek-to-live)
   if (!isHost && playback?.videoUrl && !applyingRemote) {
-    const target = expectedPos(playback) / 1000;
-    // Wide threshold — frequent small seeks look like flicker
-    if (Math.abs((video.currentTime || 0) - target) > 1.5) {
-      applyingRemote = true;
-      try {
-        video.currentTime = target;
-      } catch {
-        /* */
-      }
-      queueMicrotask(() => {
-        applyingRemote = false;
-      });
-    }
-    if (playback.isPlaying && video.paused)
-      void video.play().catch(() => undefined);
-    if (!playback.isPlaying && !video.paused) video.pause();
+    void syncFollowerPlayback(playback, applyGen, false);
   }
-}, 5000);
+}, 2000);
+
+// Wire buffer events once — pause chase while network fills
+video.addEventListener("waiting", () => {
+  if (isHost || screen !== "room") return;
+  followerBuffering = true;
+  prepareStatus = "Buffering stream…";
+  softPaintRoom();
+});
+video.addEventListener("playing", () => {
+  if (isHost) return;
+  if (followerBuffering && bufferedAheadFrom(video.currentTime || 0) >= 2) {
+    followerBuffering = false;
+    if (prepareStatus.startsWith("Buffering")) {
+      prepareStatus = "";
+      softPaintRoom();
+    }
+  }
+});
+video.addEventListener("progress", () => {
+  // When enough is buffered, resume if host is playing
+  if (isHost || !playback?.isPlaying || applyingRemote) return;
+  const ahead = bufferedAheadFrom(video.currentTime || 0);
+  if (ahead >= FOLLOWER_MIN_BUFFER_SEC && video.paused) {
+    followerBuffering = false;
+    if (prepareStatus.startsWith("Buffering")) prepareStatus = "";
+    void safePlay();
+    softPaintRoom();
+  }
+});
 
 function normalizeEvent(raw: unknown): SyncEvent | null {
   if (!raw || typeof raw !== "object") return null;

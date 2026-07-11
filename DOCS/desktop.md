@@ -91,6 +91,18 @@ WebKitGTK can crash if `app.innerHTML = …` destroys a loading/playing `<video>
 UI always **detaches** the video element before paint, mounts into `#videoMount`
 before load, seeks only after metadata, and serializes applyState generations.
 
+### Remote vs local playback
+
+Host serves progressive HTTP (Range). Local/LAN peers fill buffer instantly; remote
+friends need seconds of download cushion. Followers:
+
+- **Buffer-first** (~4s ahead) before chasing host
+- Hard-seek only if drift ≳ 4s (and prefer already-buffered ranges)
+- Soft rate tweak (±6%) for 1.5–4s drift
+- Show “Buffering…” instead of thrashing play/seek on a thin pipe
+
+Local second process looks fine because buffer fills immediately — not a separate code path.
+
 ### Linux “won't play” video
 
 System WebView = **WebKitGTK + GStreamer**, not full FFmpeg. Prefer:
