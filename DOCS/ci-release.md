@@ -26,28 +26,32 @@ R2 → **Manage R2 API Tokens** → Create → Object Read & Write on `vidsync-r
 
 Copy Access Key ID + Secret Access Key once (secret not shown again).
 
-### 3. Workers API token (landing deploy only)
-
-Separate from R2 S3 keys. Cloudflare → **My Profile → API Tokens → Create Token**  
-→ “Edit Cloudflare Workers” (or Workers Scripts **Edit**).
-
-S3 keys **cannot** deploy Workers — different API.
-
-### 4. GitHub secrets
+### 3. GitHub secrets (release CI)
 
 | Secret | Value | Used for |
 |---|---|---|
 | `R2_ACCESS_KEY_ID` | R2 S3 access key | `aws s3 cp` uploads |
 | `R2_SECRET_ACCESS_KEY` | R2 S3 secret | `aws s3 cp` uploads |
-| `R2_ACCOUNT_ID` | CF account ID | R2 endpoint `https://<id>.r2.cloudflarestorage.com` |
-| `CLOUDFLARE_API_TOKEN` | Workers API token | `wrangler deploy` only |
+| `R2_ACCOUNT_ID` | CF account ID | endpoint `https://<id>.r2.cloudflarestorage.com` |
 | `TAURI_SIGNING_PRIVATE_KEY` | contents of `.keys/vidsync.key` | sign installers |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | only if key has password | optional |
 
+**No `CLOUDFLARE_API_TOKEN` in CI.** Releases only put objects in R2. Live Worker `vidsync-web` already binds that bucket and serves `/downloads/*`, `/latest.json`, `/updater.json` from R2 on each request — no redeploy for new builds.
+
+### 4. When you *do* need wrangler (manual, rare)
+
+Only if you change **Worker code** or **static landing** (`apps/site/src/worker.ts`, `public/*` HTML/CSS/JS):
+
+```bash
+cd apps/site
+bunx wrangler deploy   # needs CF login / API token locally
+```
+
+That is Workers deploy API, not R2 S3. Not part of the release workflow.
+
 ### 5. Domain
 
-`vidsync.ratt.ing` is already on Worker `vidsync-web`.  
-`bunx wrangler deploy` from `apps/site` replaces the old site.
+`vidsync.ratt.ing` → Worker `vidsync-web` (R2 binding `vidsync-releases`).
 
 ## Updater signing keys
 

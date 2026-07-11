@@ -234,17 +234,6 @@ jobs:
             upload "$f" "downloads/linux/$(basename "$f")"
           done
 
-      # Worker code / static landing — not R2. Needs CF API token (not S3 keys).
-      - name: Deploy landing site
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        working-directory: apps/site
-        run: |
-          set -euo pipefail
-          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-            echo "Missing CLOUDFLARE_API_TOKEN — needed for wrangler deploy of vidsync-web"
-            echo "R2 S3 keys cannot deploy Workers. Create a CF API token with Workers Edit."
-            exit 1
-          fi
-          bunx wrangler deploy
+      # No wrangler here. Live Worker reads R2 — new binaries/json go live without redeploy.
+      # Site code (worker.ts / public HTML) changes: deploy manually:
+      #   cd apps/site && bunx wrangler deploy
