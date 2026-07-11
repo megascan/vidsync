@@ -108,6 +108,8 @@ let busy = false;
 let mediaSettings: MediaSettings | null = null;
 let ffmpegInfo: FfmpegStatus | null = null;
 let prepareStatus = "";
+/** Avoid full DOM rebuild while video is playing (reparent = flicker). */
+let roomShellReady = false;
 let clockOffsetMs = 0;
 let applyingRemote = false;
 let lastVersion = -1;
@@ -191,36 +193,41 @@ async function applyState(state: PlaybackState, force: boolean) {
   const prevUrl = playback?.videoUrl ?? null;
   const urlChanged = prevUrl !== state.videoUrl;
   const ver = state.version;
+  const prevPlaying = playback?.isPlaying;
   playback = state;
 
   if (!force && ver === lastVersion && !urlChanged) {
-    paint();
+    softPaintRoom();
     return;
   }
   lastVersion = ver;
 
-  // Host owns the element for local open; still apply URL changes from set_url/queue
-  const drive = !isHost || force || urlChanged;
+  // Host drives local file element — never yank src/seek from own heartbeats
+  // (was a major flicker source when state broadcast every ~4s).
+  const drive = (!isHost && Boolean(state.videoUrl)) || force || urlChanged;
+
   if (drive && state.videoUrl) {
     applyingRemote = true;
     try {
-      // Mount before load — WebKitGTK is flaky decoding fully detached <video>
       ensureVideoMounted();
       const needLoad =
         urlChanged ||
         force ||
-        !video.src ||
-        !video.src.includes(tokenFromUrl(state.videoUrl));
+        !videoHasUrl(state.videoUrl);
       if (needLoad) {
         await loadVideoSrc(state.videoUrl);
         if (gen !== applyGen) return;
       }
+      // Only hard-seek on big drift — small corrections every heartbeat = flicker
       const targetSec = expectedPos(state) / 1000;
-      await safeSeek(targetSec, gen);
-      if (gen !== applyGen) return;
+      const drift = Math.abs((video.currentTime || 0) - targetSec);
+      if (needLoad || drift > 1.25) {
+        await safeSeek(targetSec, gen);
+        if (gen !== applyGen) return;
+      }
       if (state.isPlaying) {
-        await safePlay();
-      } else {
+        if (video.paused) await safePlay();
+      } else if (!video.paused) {
         try {
           video.pause();
         } catch {
@@ -229,7 +236,6 @@ async function applyState(state: PlaybackState, force: boolean) {
       }
     } catch (e) {
       console.warn("applyState media failed", e);
-      // Don't kill the room UI — show soft error
       if (gen === applyGen) {
         error =
           e instanceof Error
@@ -248,13 +254,29 @@ async function applyState(state: PlaybackState, force: boolean) {
     try {
       video.pause();
       video.removeAttribute("src");
+      while (video.firstChild) video.removeChild(video.firstChild);
       video.load();
     } catch {
       /* */
     }
     applyingRemote = false;
   }
-  if (gen === applyGen) paint();
+
+  if (gen !== applyGen) return;
+  // Full paint only when URL / layout-relevant fields change
+  if (urlChanged || force || prevPlaying === undefined) {
+    paint();
+  } else {
+    softPaintRoom();
+  }
+}
+
+function videoHasUrl(url: string): boolean {
+  const token = tokenFromUrl(url);
+  if (video.src && video.src.includes(token)) return true;
+  const srcEl = video.querySelector("source");
+  if (srcEl?.src && srcEl.src.includes(token)) return true;
+  return false;
 }
 
 function tokenFromUrl(url: string): string {
@@ -448,9 +470,14 @@ setInterval(() => {
 
   if (!isHost && playback?.videoUrl && !applyingRemote) {
     const target = expectedPos(playback) / 1000;
-    if (Math.abs((video.currentTime || 0) - target) > 0.45) {
+    // Wide threshold — frequent small seeks look like flicker
+    if (Math.abs((video.currentTime || 0) - target) > 1.5) {
       applyingRemote = true;
-      video.currentTime = target;
+      try {
+        video.currentTime = target;
+      } catch {
+        /* */
+      }
       queueMicrotask(() => {
         applyingRemote = false;
       });
@@ -609,6 +636,7 @@ async function kickHome(message: string) {
     /* */
   }
   screen = "home";
+  roomShellReady = false;
   roomCode = "";
   isHost = false;
   sessionId = "";
@@ -617,6 +645,7 @@ async function kickHome(message: string) {
   chat = [];
   streamInfo = null;
   video.removeAttribute("src");
+  while (video.firstChild) video.removeChild(video.firstChild);
   video.load();
   busy = false;
   status = "";
@@ -677,6 +706,7 @@ async function doLeave() {
     /* */
   }
   screen = "home";
+  roomShellReady = false;
   roomCode = "";
   isHost = false;
   sessionId = "";
@@ -687,6 +717,7 @@ async function doLeave() {
   status = "";
   error = "";
   video.removeAttribute("src");
+  while (video.firstChild) video.removeChild(video.firstChild);
   video.load();
   paint();
 }
@@ -1169,13 +1200,92 @@ function bindUiOnce() {
   });
 }
 
+function softPaintRoom() {
+  if (screen !== "room" || !app.querySelector(".room-layout")) {
+    paint();
+    return;
+  }
+  const flashBar = app.querySelector(".bar-meta");
+  if (flashBar) {
+    if (error) {
+      flashBar.className = "bar-meta err";
+      flashBar.textContent = error;
+    } else if (prepareStatus) {
+      flashBar.className = "bar-meta";
+      flashBar.textContent = prepareStatus;
+    } else if (status) {
+      flashBar.className = "bar-meta";
+      flashBar.textContent = status;
+    } else {
+      flashBar.className = "bar-meta";
+      flashBar.textContent = "";
+    }
+  }
+  const people = app.querySelector(".people");
+  if (people) {
+    people.innerHTML =
+      members
+        .map((m) => {
+          const you = m.sessionId === sessionId;
+          return `<li>
+            ${platformBadge(m.platform)}
+            <span class="${you ? "you" : ""}">${escapeHtml(m.nickname)}${you ? " (you)" : ""}</span>
+            ${m.isHost ? `<span class="tag">host</span>` : ""}
+          </li>`;
+        })
+        .join("") || `<li class="empty">…</li>`;
+  }
+  const queue = app.querySelector(".queue");
+  if (queue) {
+    queue.innerHTML =
+      (playback?.queue ?? [])
+        .map((u, i) => {
+          const active = playback?.queueIndex === i;
+          if (isHost) {
+            return `<li class="q-item ${active ? "active" : ""}">
+              <button type="button" class="q-play" data-q-play="${i}" title="Play">
+                <span class="dot">${active ? "●" : "○"}</span>
+                <span class="qtext" title="${escapeAttr(u)}">${escapeHtml(shortUrl(u))}</span>
+              </button>
+              <button type="button" class="ghost sm q-x" data-q-remove="${i}" title="Remove" aria-label="Remove">×</button>
+            </li>`;
+          }
+          return `<li class="${active ? "active" : ""}">
+            <span class="dot">${active ? "●" : "○"}</span>
+            <span class="qtext" title="${escapeAttr(u)}">${escapeHtml(shortUrl(u))}</span>
+          </li>`;
+        })
+        .join("") ||
+      `<li class="empty" style="color:var(--faint)">${isHost ? "Add videos with Play file or Add to queue" : "Empty"}</li>`;
+  }
+  const chatLog = app.querySelector("#chatLog");
+  if (chatLog) {
+    chatLog.innerHTML =
+      chat
+        .map(
+          (c) =>
+            `<div class="line"><span class="nick">${escapeHtml(c.nick)}</span>${escapeHtml(c.text)}</div>`,
+        )
+        .join("") || `<div class="empty">Say something</div>`;
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+  const pill = app.querySelector(".pill");
+  if (pill) {
+    pill.className = `pill ${isHost ? "host" : "viewer"}`;
+    pill.textContent = isHost ? "Host" : "Watching";
+  }
+  ensureVideoMounted();
+}
+
 function paint() {
   if (screen === "settings") {
+    roomShellReady = false;
     paintSettings();
     return;
   }
 
   if (screen === "home") {
+    roomShellReady = false;
     const flash = error
       ? `<p class="flash err" data-flash>${escapeHtml(error)}</p>`
       : status
@@ -1224,6 +1334,16 @@ function paint() {
     return;
   }
 
+  // Soft path: room chrome already built — don't reparent <video>
+  if (
+    roomShellReady &&
+    app.querySelector(".room-layout") &&
+    app.querySelector("#videoMount")
+  ) {
+    softPaintRoom();
+    return;
+  }
+
   const media = hasMedia();
   const fileLabel = streamInfo?.fileName ?? "";
   const emptyCopy = isHost
@@ -1252,7 +1372,7 @@ function paint() {
   }
 
   app.innerHTML = `
-    <div class="screen">
+    <div class="screen room-layout">
       ${updateBannerHtml()}
       <header class="room-header">
         <div class="room-id">
@@ -1382,6 +1502,7 @@ function paint() {
 
   const log = app.querySelector("#chatLog");
   if (log) log.scrollTop = log.scrollHeight;
+  roomShellReady = true;
 }
 
 function escapeHtml(s: string): string {
@@ -1488,12 +1609,14 @@ async function boot() {
     const pct =
       p.pct != null && Number.isFinite(p.pct) ? ` ${p.pct}%` : "";
     prepareStatus = `${p.message || p.phase || "Working…"}${pct}`;
+    status = prepareStatus;
+    // Soft update only — full paint during prepare would thrash
     const el = app.querySelector(".bar-meta");
-    if (el && !error) {
+    if (el) {
+      el.className = "bar-meta";
       el.textContent = prepareStatus;
-    } else if (busy) {
-      status = prepareStatus;
-      paint();
+    } else if (screen === "room") {
+      softPaintRoom();
     }
   });
   paint();

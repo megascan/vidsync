@@ -596,16 +596,18 @@ export class Room extends DurableObject<Env> {
         break;
       }
       case "heartbeat": {
+        // Heartbeats update position without always bumping version —
+        // high-frequency version++ caused clients to re-seek / re-paint (flicker).
         this.room.state = {
           ...this.room.state,
           isPlaying: msg.isPlaying,
           positionMs: msg.positionMs,
           serverAnchorMs: now,
           updatedAtMs: now,
-          version: this.room.state.version,
         };
         const since = now - this.lastHeartbeatBroadcastMs;
-        if (since >= 4000) {
+        // Broadcast about every 8s for follower drift correction
+        if (since >= 8000) {
           this.room.state = {
             ...this.room.state,
             version: this.room.state.version + 1,
@@ -614,7 +616,10 @@ export class Room extends DurableObject<Env> {
           await this.persist();
           this.broadcastState();
         } else {
-          await this.persist();
+          // Persist less often — every other heartbeat path still touches activity
+          if (since >= 2000) {
+            await this.persist();
+          }
         }
         await this.touch();
         await this.scheduleMaintenanceAlarm();
