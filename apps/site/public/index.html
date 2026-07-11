@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VidSync — watch together</title>
+    <meta
+      name="description"
+      content="VidSync is a desktop app for watching local videos together. Create a room, share a code, stay in sync."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="hero">
+        <p class="logo">VidSync</p>
+        <h1>Watch together from your desktop</h1>
+        <p class="lede">
+          Create a room, open a video file, share a code. Everyone stays on the
+          same beat — no browser tab, no extension.
+        </p>
+      </header>
+
+      <section class="downloads" aria-labelledby="get">
+        <h2 id="get" class="visually-hidden">Download</h2>
+        <div class="cards">
+          <a class="card" id="dl-windows" href="#" aria-disabled="true">
+            <span class="platform">Windows</span>
+            <span class="action" data-label>Installer</span>
+            <span class="meta" data-meta>Loading…</span>
+          </a>
+          <a class="card" id="dl-linux" href="#" aria-disabled="true">
+            <span class="platform">Linux</span>
+            <span class="action" data-label>AppImage</span>
+            <span class="meta" data-meta>Loading…</span>
+          </a>
+        </div>
+        <p class="version" id="version-line">Checking latest build…</p>
+      </section>
+
+      <section class="points">
+        <div class="point">
+          <h3>Local files</h3>
+          <p>Stream from your machine. Friends join with a short room code.</p>
+        </div>
+        <div class="point">
+          <h3>Host controls</h3>
+          <p>Play, pause, seek, and queue stay in sync for the whole room.</p>
+        </div>
+        <div class="point">
+          <h3>Native app</h3>
+          <p>Windows and Linux builds. No website player, no CORS fights.</p>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <p>
+          Open source on
+          <a href="https://github.com/megascan/vidsync">GitHub</a>
+          · API
+          <a href="https://api.vidsync.ratt.ing/health">status</a>
+        </p>
+      </footer>
+    </main>
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
