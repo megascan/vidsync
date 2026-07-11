@@ -20,30 +20,31 @@ bun install
 bunx wrangler r2 bucket create vidsync-releases
 ```
 
-### 2. API token
+### 2. R2 S3 API token (binaries)
 
-Cloudflare dashboard → **My Profile → API Tokens → Create Token**
+R2 → **Manage R2 API Tokens** → Create → Object Read & Write on `vidsync-releases`.
 
-Permissions:
+Copy Access Key ID + Secret Access Key once (secret not shown again).
 
-- Account → **Workers Scripts** → Edit  
-- Account → **Workers R2 Storage** → Edit  
-- Account → **Account Settings** → Read (if prompted)
+### 3. Workers API token (landing deploy only)
 
-Or use the “Edit Cloudflare Workers” template + add R2 edit.
+Separate from R2 S3 keys. Cloudflare → **My Profile → API Tokens → Create Token**  
+→ “Edit Cloudflare Workers” (or Workers Scripts **Edit**).
 
-### 3. GitHub secrets
+S3 keys **cannot** deploy Workers — different API.
 
-Repo → Settings → Secrets and variables → Actions:
+### 4. GitHub secrets
 
-| Secret | Value |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | token from step 2 |
-| `CLOUDFLARE_ACCOUNT_ID` | Account ID (Workers overview right sidebar) |
-| `TAURI_SIGNING_PRIVATE_KEY` | full contents of `.keys/vidsync.key` (see signing) |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | password if key has one; empty string OK for no-password key |
+| Secret | Value | Used for |
+|---|---|---|
+| `R2_ACCESS_KEY_ID` | R2 S3 access key | `aws s3 cp` uploads |
+| `R2_SECRET_ACCESS_KEY` | R2 S3 secret | `aws s3 cp` uploads |
+| `R2_ACCOUNT_ID` | CF account ID | R2 endpoint `https://<id>.r2.cloudflarestorage.com` |
+| `CLOUDFLARE_API_TOKEN` | Workers API token | `wrangler deploy` only |
+| `TAURI_SIGNING_PRIVATE_KEY` | contents of `.keys/vidsync.key` | sign installers |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | only if key has password | optional |
 
-### 4. Domain
+### 5. Domain
 
 `vidsync.ratt.ing` is already on Worker `vidsync-web`.  
 `bunx wrangler deploy` from `apps/site` replaces the old site.

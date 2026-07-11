@@ -202,39 +202,49 @@ jobs:
           echo "--- staged files ---"
           find stage -type f -printf '%p %s\n'
 
-      - name: Upload to R2
+      - name: Upload to R2 (S3 API)
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        working-directory: apps/site
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-            echo "Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID secrets"
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || [ -z "${R2_ACCOUNT_ID:-}" ]; then
+            echo "Missing R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID secrets"
             exit 1
           fi
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
           upload() {
             local file="$1"
             local key="$2"
-            echo "R2 put $key <- $file"
-            bunx wrangler r2 object put "${R2_BUCKET}/${key}" --file="$file" --remote
+            echo "R2 put s3://${R2_BUCKET}/${key} <- $file"
+            aws s3 cp "$file" "s3://${R2_BUCKET}/${key}" --endpoint-url "$ENDPOINT"
           }
 
-          upload ../../stage/latest.json latest.json
-          upload ../../stage/updater.json updater.json
-          for f in ../../stage/downloads/windows/*; do
+          upload stage/latest.json latest.json
+          upload stage/updater.json updater.json
+          for f in stage/downloads/windows/*; do
             [ -f "$f" ] || continue
             upload "$f" "downloads/windows/$(basename "$f")"
           done
-          for f in ../../stage/downloads/linux/*; do
+          for f in stage/downloads/linux/*; do
             [ -f "$f" ] || continue
             upload "$f" "downloads/linux/$(basename "$f")"
           done
 
+      # Worker code / static landing — not R2. Needs CF API token (not S3 keys).
       - name: Deploy landing site
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         working-directory: apps/site
-        run: bunx wrangler deploy
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "Missing CLOUDFLARE_API_TOKEN — needed for wrangler deploy of vidsync-web"
+            echo "R2 S3 keys cannot deploy Workers. Create a CF API token with Workers Edit."
+            exit 1
+          fi
+          bunx wrangler deploy
