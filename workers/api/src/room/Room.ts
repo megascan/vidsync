@@ -1,9 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   CHAT_COOLDOWN_MS,
+  EMPTY_ROOM_GRACE_MS,
   MAX_MEMBERS,
   MAX_QUEUE_LENGTH,
-  ROOM_IDLE_TTL_MS,
   clientMessageSchema,
   emptyPlaybackState,
   isAllowedVideoUrl,
@@ -113,7 +113,6 @@ export class Room extends DurableObject<Env> {
         state,
       };
       await this.persist();
-      await this.scheduleIdleAlarm();
     }
 
     return Response.json({
@@ -231,7 +230,7 @@ export class Room extends DurableObject<Env> {
     }
 
     if (!this.room || !session) {
-      await this.scheduleIdleAlarm();
+      await this.scheduleEmptyRoomCleanup();
       return;
     }
 
@@ -248,35 +247,34 @@ export class Room extends DurableObject<Env> {
       await this.persist();
     }
 
-    if (hostChanged) {
-      this.broadcastState();
+    if (this.openConnectionCount() > 0) {
+      if (hostChanged) {
+        this.broadcastState();
+      }
+      this.broadcastMembers();
+      await this.ctx.storage.deleteAlarm();
+      return;
     }
-    this.broadcastMembers();
-    await this.scheduleIdleAlarm();
+
+    // Last person left — schedule wipe (short grace for refresh/reconnect)
+    await this.scheduleEmptyRoomCleanup();
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
     this.sessions.delete(ws);
-    await this.scheduleIdleAlarm();
+    await this.scheduleEmptyRoomCleanup();
   }
 
   async alarm(): Promise<void> {
-    const ttl = this.idleTtlMs();
-    if (this.liveMemberCount() > 0) {
-      await this.scheduleIdleAlarm();
+    // Still someone connected? keep the room
+    if (this.openConnectionCount() > 0) {
+      await this.ctx.storage.deleteAlarm();
       return;
     }
-    if (!this.room) {
-      await this.ctx.storage.deleteAll();
-      return;
-    }
-    const idleFor = Date.now() - this.room.lastActiveAtMs;
-    if (idleFor >= ttl) {
-      this.room = null;
-      await this.ctx.storage.deleteAll();
-      return;
-    }
-    await this.ctx.storage.setAlarm(this.room.lastActiveAtMs + ttl);
+    // Everybody left (and grace elapsed) — delete room state entirely
+    this.room = null;
+    this.sessions.clear();
+    await this.ctx.storage.deleteAll();
   }
 
   private async handleClientMessage(
@@ -765,24 +763,37 @@ export class Room extends DurableObject<Env> {
     if (!this.room) return;
     this.room.lastActiveAtMs = Date.now();
     await this.persist();
-    await this.scheduleIdleAlarm();
+    // Active traffic with members — cancel any empty-room wipe
+    if (this.openConnectionCount() > 0) {
+      await this.ctx.storage.deleteAlarm();
+    }
   }
 
-  private idleTtlMs(): number {
+  private openConnectionCount(): number {
+    return this.ctx.getWebSockets().length;
+  }
+
+  private emptyGraceMs(): number {
     const raw = this.env.ROOM_IDLE_TTL_MS;
     if (raw) {
       const n = Number(raw);
       if (Number.isFinite(n) && n > 0) return n;
     }
-    return ROOM_IDLE_TTL_MS;
+    return EMPTY_ROOM_GRACE_MS;
   }
 
-  private async scheduleIdleAlarm(): Promise<void> {
-    if (this.liveMemberCount() > 0) {
+  /** If nobody is connected, wipe room after a short grace period. */
+  private async scheduleEmptyRoomCleanup(): Promise<void> {
+    if (this.openConnectionCount() > 0) {
+      await this.ctx.storage.deleteAlarm();
       return;
     }
-    if (!this.room) return;
-    const when = this.room.lastActiveAtMs + this.idleTtlMs();
-    await this.ctx.storage.setAlarm(when);
+    if (!this.room) {
+      await this.ctx.storage.deleteAll();
+      return;
+    }
+    this.room.lastActiveAtMs = Date.now();
+    await this.persist();
+    await this.ctx.storage.setAlarm(Date.now() + this.emptyGraceMs());
   }
 }

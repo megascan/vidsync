@@ -7,7 +7,14 @@ export const MAX_VIDEO_URL_LENGTH = 2048;
 export const MAX_QUEUE_LENGTH = 50;
 export const MAX_CHAT_LENGTH = 280;
 export const HOST_HEARTBEAT_MS = 5000;
-export const ROOM_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * After the last client disconnects, wait this long before wiping the room.
+ * Short grace so a single tab refresh doesn't destroy the room; empty rooms
+ * do not sit for hours.
+ */
+export const EMPTY_ROOM_GRACE_MS = 30_000;
+/** @deprecated use EMPTY_ROOM_GRACE_MS */
+export const ROOM_IDLE_TTL_MS = EMPTY_ROOM_GRACE_MS;
 /** Min ms between chat messages per session (stateless flood control). */
 export const CHAT_COOLDOWN_MS = 400;
 

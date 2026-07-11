@@ -5,7 +5,7 @@
 - Optional `videoUrl` on create seeds the queue (home UI creates empty)
 - Turnstile on create only
 - Code is public share secret (treat like unlisted link)
-- Idle GC: DO alarm after 24h with no connections
+- Empty GC: when last client disconnects, DO alarm wipes room after ~30s grace (reconnect/refresh). No long-lived empty rooms.
 - Host = first joiner; transfer on disconnect to oldest remaining
 - Presence: sessionId + nickname (localStorage), no accounts
 
