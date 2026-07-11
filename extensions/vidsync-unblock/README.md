@@ -5,10 +5,12 @@ Optional Chromium extension. Lets [VidSync](https://vidsync.ratt.ing) fetch queu
 ## What it does
 
 - Runs **only** on `https://vidsync.ratt.ing` and local dev (`localhost:4321`)
-- **CORS shim** (`declarativeNetRequest`): adds `Access-Control-*` on media/XHR
-  responses when the request was initiated by VidSync — so `<video>` / hls.js work
-- **Fetch bridge**: optional full-body fetch for small progressive files / segments
-- Room button **Open with Unblock** enables shim + reloads the current stream
+- **Streaming CORS shim** (`declarativeNetRequest`): adds `Access-Control-*` +
+  `Accept-Ranges` on media/XHR when initiated by VidSync so the **browser** can
+  Range-stream multi‑GB progressive MP4 (no full download)
+- **HLS**: segment loader / page XHR works under the same shim
+- **Fetch bridge**: only small bodies (segments / files ≤32MB) — **never** whole movies
+- Room button **Stream with Unblock** enables shim + reloads for Range streaming
 - **Does not** upload media to VidSync or Cloudflare
 - **Does not** fix LAN reachability (remote friends still need a public URL)
 

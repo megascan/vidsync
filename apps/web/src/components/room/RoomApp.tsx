@@ -628,10 +628,10 @@ export default function RoomApp() {
                   }
                 >
                   {openingUnblock
-                    ? "Opening…"
+                    ? "Starting stream…"
                     : unblockOn
-                      ? "Open with Unblock"
-                      : "Open with Unblock (install ext)"}
+                      ? "Stream with Unblock"
+                      : "Stream with Unblock (install ext)"}
                 </button>
                 <button
                   type="button"

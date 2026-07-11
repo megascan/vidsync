@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "VidSync Unblock",
-  "version": "1.1.0",
-  "description": "Optional helper for VidSync: strip CORS on media requests from VidSync, and fetch when needed. Only activates for VidSync tabs.",
+  "version": "1.2.0",
+  "description": "VidSync helper: streaming CORS for multi‑GB progressive video (Range) + HLS segments. No full-file download of huge media.",
   "permissions": ["storage", "tabs", "declarativeNetRequest"],
   "host_permissions": ["*://*/*"],
   "background": {

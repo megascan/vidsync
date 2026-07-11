@@ -1,9 +1,8 @@
 /**
  * VidSync Unblock — service worker
  *
- * 1) declarativeNetRequest: add CORS headers on media/XHR responses
- *    initiated by VidSync pages (so <video> / hls.js work in-page).
- * 2) Message fetch: content script can pull bytes when DNR isn't enough.
+ * Progressive multi‑GB media: DNR CORS shim so the browser streams with Range.
+ * Never full-download large files. Small segment fetch for HLS loaders only.
  */
 
 const ALLOWED_PAGE_ORIGINS = new Set([
@@ -12,8 +11,8 @@ const ALLOWED_PAGE_ORIGINS = new Set([
   "http://127.0.0.1:4321",
 ]);
 
-const CORS_RULE_ID = 1;
-const MAX_BODY_BYTES = 80 * 1024 * 1024;
+/** Max body for explicit full fetch (HLS segments / tiny files). Not for movies. */
+const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 function isHttpUrl(url) {
   if (!url || typeof url !== "string") return false;
@@ -65,58 +64,99 @@ function bufferToBase64(buf) {
   return btoa(binary);
 }
 
+/**
+ * CORS for progressive streaming: browser issues Range itself.
+ * Never set Allow-Credentials with * — browsers reject that combo.
+ */
 async function ensureCorsRules() {
-  const rule = {
-    id: CORS_RULE_ID,
-    priority: 1,
-    action: {
-      type: "modifyHeaders",
-      responseHeaders: [
-        {
-          header: "Access-Control-Allow-Origin",
-          operation: "set",
-          value: "*",
-        },
-        {
-          header: "Access-Control-Allow-Methods",
-          operation: "set",
-          value: "GET, HEAD, OPTIONS",
-        },
-        {
-          header: "Access-Control-Allow-Headers",
-          operation: "set",
-          value: "*",
-        },
-        {
-          header: "Access-Control-Expose-Headers",
-          operation: "set",
-          value: "*, Content-Length, Content-Range, Accept-Ranges, Content-Type",
-        },
-        {
-          header: "Access-Control-Allow-Credentials",
-          operation: "set",
-          value: "true",
-        },
-      ],
+  const resourceTypes = [
+    "xmlhttprequest",
+    "media",
+    "other",
+    "image",
+  ];
+
+  /** @type {chrome.declarativeNetRequest.Rule[]} */
+  const rules = [
+    {
+      id: 1,
+      priority: 1,
+      action: {
+        type: "modifyHeaders",
+        responseHeaders: corsResponseHeaders("https://vidsync.ratt.ing"),
+      },
+      condition: {
+        initiatorDomains: ["vidsync.ratt.ing"],
+        resourceTypes,
+      },
     },
-    condition: {
-      // Only rewrite responses for requests that VidSync initiated
-      initiatorDomains: ["vidsync.ratt.ing", "localhost", "127.0.0.1"],
-      resourceTypes: [
-        "xmlhttprequest",
-        "media",
-        "other",
-        "image",
-        "font",
-      ],
+    {
+      id: 2,
+      priority: 1,
+      action: {
+        type: "modifyHeaders",
+        responseHeaders: corsResponseHeaders("http://localhost:4321"),
+      },
+      condition: {
+        initiatorDomains: ["localhost"],
+        resourceTypes,
+      },
     },
-  };
+    {
+      id: 3,
+      priority: 1,
+      action: {
+        type: "modifyHeaders",
+        responseHeaders: corsResponseHeaders("http://127.0.0.1:4321"),
+      },
+      condition: {
+        initiatorDomains: ["127.0.0.1"],
+        resourceTypes,
+      },
+    },
+  ];
 
   await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [CORS_RULE_ID],
-    addRules: [rule],
+    removeRuleIds: [1, 2, 3],
+    addRules: rules,
   });
   return true;
+}
+
+/**
+ * @param {string} allowOrigin
+ * @returns {chrome.declarativeNetRequest.ModifyHeaderInfo[]}
+ */
+function corsResponseHeaders(allowOrigin) {
+  return [
+    {
+      header: "Access-Control-Allow-Origin",
+      operation: "set",
+      value: allowOrigin,
+    },
+    {
+      header: "Access-Control-Allow-Methods",
+      operation: "set",
+      value: "GET, HEAD, OPTIONS",
+    },
+    {
+      header: "Access-Control-Allow-Headers",
+      operation: "set",
+      value: "Range, Content-Type, Accept, Origin",
+    },
+    {
+      header: "Access-Control-Expose-Headers",
+      operation: "set",
+      value:
+        "Accept-Ranges, Content-Length, Content-Range, Content-Type, Content-Encoding",
+    },
+    // Help some players if origin omitted Accept-Ranges
+    {
+      header: "Accept-Ranges",
+      operation: "set",
+      value: "bytes",
+    },
+  ];
 }
 
 async function setTabBadge(tabId, active) {
@@ -130,7 +170,7 @@ async function setTabBadge(tabId, active) {
       });
       await chrome.action.setTitle({
         tabId,
-        title: "VidSync Unblock — active on this tab",
+        title: "VidSync Unblock — streaming CORS active",
       });
     } else {
       await chrome.action.setBadgeText({ tabId, text: "" });
@@ -144,25 +184,24 @@ async function setTabBadge(tabId, active) {
 chrome.runtime.onInstalled.addListener(() => {
   void ensureCorsRules();
 });
-
 chrome.runtime.onStartup.addListener(() => {
   void ensureCorsRules();
 });
-
-// Session rules die when browser restarts — re-apply when SW wakes
 void ensureCorsRules();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "tab_active") {
     void setTabBadge(sender.tab?.id, Boolean(message.active));
     void ensureCorsRules();
-    sendResponse({ ok: true });
+    sendResponse({ ok: true, stream: true });
     return false;
   }
 
   if (message?.type === "enable_cors") {
     void ensureCorsRules()
-      .then(() => sendResponse({ ok: true, cors: true }))
+      .then(() =>
+        sendResponse({ ok: true, cors: true, stream: true, mode: "range" }),
+      )
       .catch((e) =>
         sendResponse({
           ok: false,
@@ -190,6 +229,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ok: true,
       version: chrome.runtime.getManifest().version,
       cors: true,
+      stream: true,
+      mode: "range",
     });
     return false;
   }
@@ -234,6 +275,7 @@ async function handleFetch(message, sendResponse) {
 
     const method = message.method === "HEAD" ? "HEAD" : "GET";
     const headers = buildHeaders(message.headers);
+    const hasRange = headers.has("Range") || headers.has("range");
 
     const res = await fetch(url, {
       method,
@@ -259,16 +301,33 @@ async function handleFetch(message, sendResponse) {
       return;
     }
 
+    // Range responses (206) are streaming chunks — always allow (segment-sized)
     const lenHeader = res.headers.get("content-length");
+    if (!hasRange && lenHeader) {
+      const n = Number(lenHeader);
+      if (Number.isFinite(n) && n > MAX_BODY_BYTES) {
+        sendResponse({
+          ok: false,
+          error: "use_range_stream",
+          status: res.status,
+          headers: outHeaders,
+          message:
+            "Large file — use streaming (CORS shim + Range), not full download.",
+        });
+        return;
+      }
+    }
+
+    // Even with Range, cap absurd single chunks
     if (lenHeader) {
       const n = Number(lenHeader);
       if (Number.isFinite(n) && n > MAX_BODY_BYTES) {
         sendResponse({
           ok: false,
-          error: "body_too_large",
+          error: "chunk_too_large",
           status: res.status,
           headers: outHeaders,
-          message: `File is ~${Math.round(n / 1024 / 1024)}MB — skip full download. Use CORS shim + normal/Range play (Open with Unblock does that for progressive). HLS segments stay small.`,
+          message: "Range chunk too large",
         });
         return;
       }
