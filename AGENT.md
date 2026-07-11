@@ -26,6 +26,13 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 - CI: `.github/workflows/desktop-release.yml` → R2 + site
 
 ## Docs
-- `DOCS/ci-release.md` — GH Actions + R2 secrets
+- `DOCS/ci-release.md` — GH Actions + R2 + **Tauri auto-update** secrets
 - `DOCS/desktop.md` — desktop architecture
 - `DOCS/sync-protocol.md` — wire protocol
+
+## Auto-update
+- Plugin: `tauri-plugin-updater` + `process` (relaunch)
+- Endpoint: `https://vidsync.ratt.ing/updater.json` (R2, signed platforms)
+- Secrets: `TAURI_SIGNING_PRIVATE_KEY` (+ optional password)
+- Pubkey: `apps/desktop/src-tauri/tauri.conf.json` → `plugins.updater.pubkey`
+- Private key: local `.keys/` only (gitignored)

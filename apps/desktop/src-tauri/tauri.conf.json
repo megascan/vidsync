@@ -26,6 +26,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis", "msi", "deb", "appimage"],
     "icon": [
       "icons/32x32.png",
@@ -37,6 +38,17 @@
     "windows": {
       "nsis": {
         "compression": "lzma"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUzQUJFRkRBRTA2RDdFRDIKUldUU2ZtM2cydStyVStKY2pkbjRmMjRDMzJLNTlBWDdEUjhZb2ZiZ1RVZnExNXpWR2F3KzVvU0cK",
+      "endpoints": [
+        "https://vidsync.ratt.ing/updater.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

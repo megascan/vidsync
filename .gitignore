@@ -13,3 +13,6 @@ coverage
 
 # Rust
 **/target/
+
+# Tauri updater signing keys (NEVER commit private key)
+.keys/

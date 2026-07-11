@@ -48,6 +48,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "ansi",
 ] }
 url = "2"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-updater = "2.10.1"
 
 # Smaller release binaries (Tauri size guide)
 [profile.release]

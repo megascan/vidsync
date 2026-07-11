@@ -1,5 +1,6 @@
 # Tech debt
 
+- **GH secret required before next release CI works:** set `TAURI_SIGNING_PRIVATE_KEY` to contents of local `.keys/vidsync.key` (password empty / omit). Without it, signed `tauri build` fails.
 - Local overrides: web `apps/web/.env`, api `workers/api/.dev.vars` (WEB_ORIGIN). Prod defaults: `vidsync.ratt.ing` / `api.vidsync.ratt.ing`.
 - Desktop create skips Turnstile (`X-VidSync-Client: desktop/…`) — **need CF rate-limit / IP bucket** before abuse (same as member-cap gap).
 - No IP rate limiting yet beyond member cap — add CF rate-limit rules or Worker bucket before public launch.

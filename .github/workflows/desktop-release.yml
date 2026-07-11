@@ -1,5 +1,5 @@
 # Build VidSync desktop (Windows + Linux) on every push to master,
-# upload installers to R2, deploy landing page to vidsync.ratt.ing.
+# sign updater artifacts, upload installers to R2, deploy landing.
 
 name: Desktop release
 
@@ -70,24 +70,36 @@ jobs:
         working-directory: apps/desktop
         run: bun install
 
-      - name: Build Tauri
+      - name: Build Tauri (signed updater artifacts)
         working-directory: apps/desktop
         run: bunx tauri build
         env:
-          # Avoid interactive prompts
           CI: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Collect Windows artifacts
         if: matrix.os_name == 'windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-out | Out-Null
-          $nsis = Get-ChildItem -Path apps/desktop/src-tauri/target/release/bundle/nsis -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          $msi = Get-ChildItem -Path apps/desktop/src-tauri/target/release/bundle/msi -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          $nsisDir = "apps/desktop/src-tauri/target/release/bundle/nsis"
+          $msiDir = "apps/desktop/src-tauri/target/release/bundle/msi"
+          $nsis = Get-ChildItem -Path $nsisDir -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msi = Get-ChildItem -Path $msiDir -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           $exe = "apps/desktop/src-tauri/target/release/vidsync-desktop.exe"
-          if ($nsis) { Copy-Item $nsis.FullName dist-out/VidSync-windows-setup.exe }
-          if ($msi) { Copy-Item $msi.FullName dist-out/VidSync-windows.msi }
+          if ($nsis) {
+            Copy-Item $nsis.FullName dist-out/VidSync-windows-setup.exe
+            $sig = "$($nsis.FullName).sig"
+            if (Test-Path $sig) { Copy-Item $sig dist-out/VidSync-windows-setup.exe.sig }
+          }
+          if ($msi) {
+            Copy-Item $msi.FullName dist-out/VidSync-windows.msi
+            $sig = "$($msi.FullName).sig"
+            if (Test-Path $sig) { Copy-Item $sig dist-out/VidSync-windows.msi.sig }
+          }
           if (Test-Path $exe) { Copy-Item $exe dist-out/VidSync-windows.exe }
+          Get-ChildItem dist-out | Format-Table Name, Length
 
       - name: Collect Linux artifacts
         if: matrix.os_name == 'linux'
@@ -96,8 +108,13 @@ jobs:
           APPIMAGE=$(find apps/desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' 2>/dev/null | head -n1 || true)
           DEB=$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' 2>/dev/null | head -n1 || true)
           BIN="apps/desktop/src-tauri/target/release/vidsync-desktop"
-          [ -n "$APPIMAGE" ] && cp "$APPIMAGE" dist-out/VidSync-linux.AppImage
-          [ -n "$DEB" ] && cp "$DEB" dist-out/VidSync-linux.deb
+          if [ -n "$APPIMAGE" ]; then
+            cp "$APPIMAGE" dist-out/VidSync-linux.AppImage
+            [ -f "${APPIMAGE}.sig" ] && cp "${APPIMAGE}.sig" dist-out/VidSync-linux.AppImage.sig
+          fi
+          if [ -n "$DEB" ]; then
+            cp "$DEB" dist-out/VidSync-linux.deb
+          fi
           [ -f "$BIN" ] && cp "$BIN" dist-out/VidSync-linux
           ls -la dist-out || true
 
@@ -138,7 +155,7 @@ jobs:
         working-directory: apps/site
         run: bun install
 
-      - name: Build latest.json + stage downloads
+      - name: Build latest.json + updater.json + stage downloads
         id: meta
         env:
           COMMIT: ${{ github.sha }}
@@ -148,30 +165,40 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p stage/downloads/windows stage/downloads/linux
 
-          if [ -f artifacts/windows/VidSync-windows-setup.exe ]; then
-            cp artifacts/windows/VidSync-windows-setup.exe stage/downloads/windows/
-          fi
-          if [ -f artifacts/windows/VidSync-windows.msi ]; then
-            cp artifacts/windows/VidSync-windows.msi stage/downloads/windows/
-          fi
-          if [ -f artifacts/windows/VidSync-windows.exe ]; then
-            cp artifacts/windows/VidSync-windows.exe stage/downloads/windows/
-          fi
+          stage_win() {
+            local src="$1" dest="$2"
+            if [ -f "$src" ]; then
+              cp "$src" "stage/downloads/windows/$dest"
+            fi
+          }
+          stage_lin() {
+            local src="$1" dest="$2"
+            if [ -f "$src" ]; then
+              cp "$src" "stage/downloads/linux/$dest"
+            fi
+          }
 
-          if [ -f artifacts/linux/VidSync-linux.AppImage ]; then
-            cp artifacts/linux/VidSync-linux.AppImage stage/downloads/linux/
+          stage_win artifacts/windows/VidSync-windows-setup.exe VidSync-windows-setup.exe
+          stage_win artifacts/windows/VidSync-windows-setup.exe.sig VidSync-windows-setup.exe.sig
+          stage_win artifacts/windows/VidSync-windows.msi VidSync-windows.msi
+          stage_win artifacts/windows/VidSync-windows.exe VidSync-windows.exe
+
+          stage_lin artifacts/linux/VidSync-linux.AppImage VidSync-linux.AppImage
+          stage_lin artifacts/linux/VidSync-linux.AppImage.sig VidSync-linux.AppImage.sig
+          stage_lin artifacts/linux/VidSync-linux.deb VidSync-linux.deb
+          stage_lin artifacts/linux/VidSync-linux VidSync-linux
+
+          if [ -f stage/downloads/linux/VidSync-linux.AppImage ]; then
             chmod +x stage/downloads/linux/VidSync-linux.AppImage
           fi
-          if [ -f artifacts/linux/VidSync-linux.deb ]; then
-            cp artifacts/linux/VidSync-linux.deb stage/downloads/linux/
-          fi
-          if [ -f artifacts/linux/VidSync-linux ]; then
-            cp artifacts/linux/VidSync-linux stage/downloads/linux/
+          if [ -f stage/downloads/linux/VidSync-linux ]; then
             chmod +x stage/downloads/linux/VidSync-linux
           fi
 
           node apps/site/scripts/make-latest.mjs stage "$VERSION" "$COMMIT"
+          node apps/site/scripts/make-updater.mjs stage "$VERSION" "https://vidsync.ratt.ing"
           cp stage/latest.json apps/site/public/latest.json
+          cp stage/updater.json apps/site/public/updater.json
           echo "--- staged files ---"
           find stage -type f -printf '%p %s\n'
 
@@ -194,8 +221,8 @@ jobs:
             bunx wrangler r2 object put "${R2_BUCKET}/${key}" --file="$file" --remote
           }
 
-          # Binaries + latest.json
           upload ../../stage/latest.json latest.json
+          upload ../../stage/updater.json updater.json
           for f in ../../stage/downloads/windows/*; do
             [ -f "$f" ] || continue
             upload "$f" "downloads/windows/$(basename "$f")"

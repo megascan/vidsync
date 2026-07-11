@@ -16,8 +16,14 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (path === "/latest.json" || path === "/latest.json/") {
-      const obj = await env.DOWNLOADS.get("latest.json");
+    if (
+      path === "/latest.json" ||
+      path === "/latest.json/" ||
+      path === "/updater.json" ||
+      path === "/updater.json/"
+    ) {
+      const key = path.replace(/\/$/, "").replace(/^\//, "");
+      const obj = await env.DOWNLOADS.get(key);
       if (obj) {
         return new Response(obj.body, {
           headers: {

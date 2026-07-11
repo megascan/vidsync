@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import "./styles.css";
 
 type Member = {
@@ -89,6 +91,18 @@ let applyingRemote = false;
 let lastVersion = -1;
 let chatDraft = "";
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** In-app auto-update (Tauri signed releases). */
+type UpdateUi =
+  | { phase: "idle" }
+  | { phase: "available"; version: string }
+  | { phase: "downloading"; version: string; pct: number | null }
+  | { phase: "ready"; version: string }
+  | { phase: "error"; message: string };
+
+let updateUi: UpdateUi = { phase: "idle" };
+let pendingUpdate: Update | null = null;
+let updateBusy = false;
 
 const video = document.createElement("video");
 video.playsInline = true;
@@ -589,11 +603,106 @@ function shortUrl(u: string): string {
   }
 }
 
+async function checkForUpdates() {
+  try {
+    const update = await check();
+    if (!update) {
+      updateUi = { phase: "idle" };
+      pendingUpdate = null;
+      return;
+    }
+    pendingUpdate = update;
+    updateUi = { phase: "available", version: update.version };
+    paint();
+  } catch (e) {
+    // Offline / first boot without endpoint — silent
+    console.warn("update check failed", e);
+  }
+}
+
+async function doInstallUpdate() {
+  if (!pendingUpdate || updateBusy) return;
+  updateBusy = true;
+  const version = pendingUpdate.version;
+  updateUi = { phase: "downloading", version, pct: null };
+  paint();
+  try {
+    let downloaded = 0;
+    let total: number | null = null;
+    await pendingUpdate.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength ?? null;
+        updateUi = { phase: "downloading", version, pct: total ? 0 : null };
+        paint();
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        const pct =
+          total && total > 0
+            ? Math.min(99, Math.round((downloaded / total) * 100))
+            : null;
+        updateUi = { phase: "downloading", version, pct };
+        paint();
+      } else if (event.event === "Finished") {
+        updateUi = { phase: "ready", version };
+        paint();
+      }
+    });
+    updateUi = { phase: "ready", version };
+    paint();
+    // Windows exits during install; relaunch for Linux/macOS
+    await relaunch();
+  } catch (e) {
+    updateUi = {
+      phase: "error",
+      message: friendlyErr(e) || "Update failed",
+    };
+    pendingUpdate = null;
+    paint();
+  } finally {
+    updateBusy = false;
+  }
+}
+
+function updateBannerHtml(): string {
+  if (updateUi.phase === "idle") return "";
+  if (updateUi.phase === "available") {
+    return `<div class="update-banner" role="status">
+      <span>Update <strong>v${escapeHtml(updateUi.version)}</strong> ready</span>
+      <button type="button" class="primary sm" id="updateInstall" ${updateBusy ? "disabled" : ""}>Install &amp; restart</button>
+      <button type="button" class="ghost sm" id="updateDismiss">Later</button>
+    </div>`;
+  }
+  if (updateUi.phase === "downloading") {
+    const pct =
+      updateUi.pct != null ? `${updateUi.pct}%` : "downloading…";
+    return `<div class="update-banner" role="status">
+      <span>Installing v${escapeHtml(updateUi.version)} · ${escapeHtml(pct)}</span>
+    </div>`;
+  }
+  if (updateUi.phase === "ready") {
+    return `<div class="update-banner" role="status">
+      <span>Update installed — restarting…</span>
+    </div>`;
+  }
+  return `<div class="update-banner err" role="status">
+    <span>${escapeHtml(updateUi.message)}</span>
+    <button type="button" class="ghost sm" id="updateDismiss">Dismiss</button>
+  </div>`;
+}
+
 function bindUiOnce() {
   app.addEventListener("click", (e) => {
     const btn = (e.target as HTMLElement).closest("button");
     if (!btn || btn.hasAttribute("disabled")) return;
     switch (btn.id) {
+      case "updateInstall":
+        void doInstallUpdate();
+        break;
+      case "updateDismiss":
+        updateUi = { phase: "idle" };
+        pendingUpdate = null;
+        paint();
+        break;
       case "create":
         void doCreate();
         break;
@@ -695,6 +804,7 @@ function paint() {
 
     app.innerHTML = `
       <div class="screen home">
+        ${updateBannerHtml()}
         <div class="home-card">
           <div class="brand">
             <h1 class="brand-mark">VidSync</h1>
@@ -748,6 +858,7 @@ function paint() {
 
   app.innerHTML = `
     <div class="screen">
+      ${updateBannerHtml()}
       <header class="room-header">
         <div class="room-id">
           <code>${escapeHtml(roomCode)}</code>
@@ -904,6 +1015,8 @@ async function boot() {
     void onSync(e.payload);
   });
   paint();
+  // Non-blocking; banner paints when update found
+  void checkForUpdates();
 }
 
 void boot();

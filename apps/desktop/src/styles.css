@@ -126,16 +126,51 @@ input:disabled {
   min-height: 0;
 }
 
+/* ——— Auto-update banner ——— */
+.update-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--elevated));
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.update-banner.err {
+  background: color-mix(in srgb, var(--danger) 12%, var(--elevated));
+  border-bottom-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+}
+
+.update-banner strong {
+  font-weight: 650;
+  color: var(--accent);
+}
+
 /* ——— Home ——— */
 .home {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 0;
   background:
     radial-gradient(900px 420px at 50% -10%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 70%),
     var(--bg);
+  min-height: 0;
+}
+
+.home > .update-banner {
+  align-self: stretch;
+}
+
+.home > .home-card {
+  margin: auto;
+  padding: 24px;
 }
 
 .home-card {
