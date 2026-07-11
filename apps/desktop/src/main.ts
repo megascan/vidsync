@@ -82,6 +82,45 @@ function pick<T>(obj: Record<string, unknown>, ...keys: string[]): T | undefined
   return undefined;
 }
 
+/** Coerce server/Rust member shapes; drop exact sessionId dupes. */
+function normalizeMembers(raw: unknown): Member[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Member[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const sessionId = String(
+      pick(o, "sessionId", "session_id") ?? "",
+    ).trim();
+    if (!sessionId || seen.has(sessionId)) continue;
+    seen.add(sessionId);
+    const platform = pick<string>(o, "platform");
+    out.push({
+      sessionId,
+      nickname: String(pick(o, "nickname") ?? "viewer"),
+      isHost: Boolean(pick(o, "isHost", "is_host")),
+      ...(platform ? { platform } : {}),
+    });
+  }
+  return out;
+}
+
+function peopleListHtml(list: Member[]): string {
+  return (
+    list
+      .map((m) => {
+        const you = m.sessionId === sessionId;
+        return `<li>
+          ${platformBadge(m.platform)}
+          <span class="${you ? "you" : ""}">${escapeHtml(m.nickname)}${you ? " (you)" : ""}</span>
+          ${m.isHost ? `<span class="tag">host</span>` : ""}
+        </li>`;
+      })
+      .join("") || `<li class="empty">…</li>`
+  );
+}
+
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
 const DEFAULT_API = "https://api.vidsync.ratt.ing";
@@ -448,9 +487,52 @@ function ensureVideoMounted() {
   const mount = app.querySelector("#videoMount");
   if (!mount) return;
   mount.querySelector(".video-empty")?.remove();
+  video.controls = true;
   if (video.parentElement !== mount) {
     mount.appendChild(video);
   }
+}
+
+/** Mount video only with media; otherwise show empty copy (no native controls). */
+function syncVideoMount() {
+  const mount = app.querySelector("#videoMount");
+  if (!mount) return;
+  if (hasMedia()) {
+    ensureVideoMounted();
+    return;
+  }
+  try {
+    video.pause();
+  } catch {
+    /* */
+  }
+  video.controls = false;
+  if (video.parentElement === mount) {
+    video.remove();
+  }
+  // Clear any leftover src so a reparent doesn't flash old frames
+  if (video.src || video.querySelector("source")) {
+    video.removeAttribute("src");
+    while (video.firstChild) video.removeChild(video.firstChild);
+    try {
+      video.load();
+    } catch {
+      /* */
+    }
+  }
+  const emptyCopy = isHost
+    ? {
+        title: "Nothing playing",
+        body: "Open a video or audio file to start the room.",
+      }
+    : {
+        title: "Waiting for host",
+        body: "Media shows up here when they start streaming.",
+      };
+  mount.innerHTML = `<div class="video-empty">
+    <strong>${escapeHtml(emptyCopy.title)}</strong>
+    <span>${escapeHtml(emptyCopy.body)}</span>
+  </div>`;
 }
 
 /** Host player controls — rebuilt on soft paint when role / media changes. */
@@ -740,7 +822,7 @@ function normalizeEvent(raw: unknown): SyncEvent | null {
       session_id: pick(o, "session_id", "sessionId") as string,
       is_host: Boolean(pick(o, "is_host", "isHost")),
       state: pick(o, "state") as PlaybackState,
-      members: (pick(o, "members") as Member[]) ?? [],
+      members: normalizeMembers(pick(o, "members")),
       server_time_ms: Number(pick(o, "server_time_ms", "serverTimeMs") ?? 0),
     };
   }
@@ -752,7 +834,10 @@ function normalizeEvent(raw: unknown): SyncEvent | null {
     };
   }
   if (kind === "members") {
-    return { kind: "members", members: (pick(o, "members") as Member[]) ?? [] };
+    return {
+      kind: "members",
+      members: normalizeMembers(pick(o, "members")),
+    };
   }
   if (kind === "chat") {
     const message = pick<Record<string, unknown>>(o, "message") ?? o;
@@ -1533,24 +1618,14 @@ function softPaintRoom() {
     }
   }
 
-  const peopleTitle = app.querySelector(".panel-title");
-  if (peopleTitle && peopleTitle.textContent?.startsWith("People")) {
+  const peopleTitle = app.querySelector("[data-people-title]");
+  if (peopleTitle) {
     peopleTitle.textContent = `People · ${members.length}`;
   }
 
   const people = app.querySelector(".people");
   if (people) {
-    people.innerHTML =
-      members
-        .map((m) => {
-          const you = m.sessionId === sessionId;
-          return `<li>
-            ${platformBadge(m.platform)}
-            <span class="${you ? "you" : ""}">${escapeHtml(m.nickname)}${you ? " (you)" : ""}</span>
-            ${m.isHost ? `<span class="tag">host</span>` : ""}
-          </li>`;
-        })
-        .join("") || `<li class="empty">…</li>`;
+    people.innerHTML = peopleListHtml(members);
   }
   const queue = app.querySelector(".queue");
   if (queue) {
@@ -1607,32 +1682,7 @@ function softPaintRoom() {
     pill.textContent = isHost ? "Host" : "Watching";
   }
 
-  const mount = app.querySelector("#videoMount");
-  if (mount) {
-    if (hasMedia()) {
-      ensureVideoMounted();
-    } else {
-      // Detach blank video + restore empty copy if soft-path wiped it
-      if (video.parentElement === mount) {
-        video.remove();
-      }
-      if (!mount.querySelector(".video-empty")) {
-        const emptyCopy = isHost
-          ? {
-              title: "Nothing playing",
-              body: "Open a video or audio file to start the room.",
-            }
-          : {
-              title: "Waiting for host",
-              body: "Media shows up here when they start streaming.",
-            };
-        mount.innerHTML = `<div class="video-empty">
-          <strong>${escapeHtml(emptyCopy.title)}</strong>
-          <span>${escapeHtml(emptyCopy.body)}</span>
-        </div>`;
-      }
-    }
-  }
+  syncVideoMount();
 }
 
 function paint() {
@@ -1780,20 +1830,9 @@ function paint() {
         </div>
         <aside class="side">
           <div class="panel">
-            <p class="panel-title">People · ${members.length}</p>
+            <p class="panel-title" data-people-title>People · ${members.length}</p>
             <ul class="people">
-              ${
-                members
-                  .map((m) => {
-                    const you = m.sessionId === sessionId;
-                    return `<li>
-                      ${platformBadge(m.platform)}
-                      <span class="${you ? "you" : ""}">${escapeHtml(m.nickname)}${you ? " (you)" : ""}</span>
-                      ${m.isHost ? `<span class="tag">host</span>` : ""}
-                    </li>`;
-                  })
-                  .join("") || `<li class="empty">…</li>`
-              }
+              ${peopleListHtml(members)}
             </ul>
           </div>
           <div class="panel">
@@ -1851,11 +1890,12 @@ function paint() {
       </div>
     </div>`;
 
-  const mount = app.querySelector("#videoMount");
-  if (mount && media) {
+  if (media) {
     ensureVideoMounted();
+  } else {
+    // video already detached above; empty copy is in markup
+    video.controls = false;
   }
-  // if !media, video stays detached (already removed above)
 
   const log = app.querySelector("#chatLog");
   if (log) log.scrollTop = log.scrollHeight;

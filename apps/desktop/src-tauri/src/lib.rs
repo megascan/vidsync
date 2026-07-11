@@ -76,6 +76,9 @@ async fn leave_internal(state: &AppState) {
     if let Ok(mut g) = state.sync_tx.lock() {
         *g = None;
     }
+    // Give the WS task a beat to finish close before a rejoin opens a new
+    // socket — otherwise the DO still lists the ghost for a moment.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let hub = {
         let mut g = state.hub.lock().await;
         g.take()

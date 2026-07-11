@@ -365,11 +365,14 @@ export class Room extends DurableObject<Env> {
 
       const now = Date.now();
 
-      // Same desktop process re-hello'd (leave/rejoin race or auto-reconnect):
-      // drop older sockets so they don't show as duplicate members.
+      // Drop ghost sockets from leave/rejoin + auto-reconnect races.
+      // Must run BEFORE isHostLive — rebuild used to re-add half-closed ghosts.
+      await this.pruneDeadSockets();
       if (session.clientKey) {
         await this.kickSessionsWithClientKey(ws, session);
       }
+      // Pre-clientKey ghosts (or failed attachment): same nick + platform, no key
+      await this.kickOrphanNickTwins(ws, session);
 
       // Claim host if none / dead host (reconnect after DO drop).
       if (!this.room.state.hostSessionId || !this.isHostLive()) {
@@ -801,6 +804,10 @@ export class Room extends DurableObject<Env> {
     const text = JSON.stringify(msg);
     for (const [ws, session] of this.sessions) {
       if (!session.helloDone) continue;
+      if (!this.socketIsOpen(ws)) {
+        this.sessions.delete(ws);
+        continue;
+      }
       try {
         ws.send(text);
       } catch {
@@ -810,6 +817,10 @@ export class Room extends DurableObject<Env> {
   }
 
   private send(ws: WebSocket, msg: ServerMessage): void {
+    if (!this.socketIsOpen(ws)) {
+      this.sessions.delete(ws);
+      return;
+    }
     try {
       ws.send(JSON.stringify(msg));
     } catch {
@@ -818,10 +829,27 @@ export class Room extends DurableObject<Env> {
   }
 
   private memberList(): Member[] {
+    this.rebuildSessionsFromHibernation();
     const hostId = this.room?.state.hostSessionId ?? null;
-    const list: Member[] = [];
+
+    // Prefer one row per clientKey (latest join wins). Hides reconnect ghosts
+    // even if close() hasn't finished yet on the DO.
+    const bestByKey = new Map<string, SessionAttachment>();
+    const noKey: SessionAttachment[] = [];
     for (const session of this.sessions.values()) {
       if (!session.helloDone) continue;
+      if (session.clientKey) {
+        const prev = bestByKey.get(session.clientKey);
+        if (!prev || session.joinedAtMs >= prev.joinedAtMs) {
+          bestByKey.set(session.clientKey, session);
+        }
+      } else {
+        noKey.push(session);
+      }
+    }
+
+    const list: Member[] = [];
+    const push = (session: SessionAttachment) => {
       list.push({
         sessionId: session.sessionId,
         nickname: session.nickname,
@@ -832,9 +860,31 @@ export class Room extends DurableObject<Env> {
             }
           : {}),
       });
-    }
+    };
+    for (const s of bestByKey.values()) push(s);
+    for (const s of noKey) push(s);
     list.sort((a, b) => a.nickname.localeCompare(b.nickname));
     return list;
+  }
+
+  private socketIsOpen(ws: WebSocket): boolean {
+    // 1 = OPEN. CLOSING/CLOSED ghosts must not re-enter the member map.
+    try {
+      return ws.readyState === 1;
+    } catch {
+      return false;
+    }
+  }
+
+  private closeSocket(ws: WebSocket, code: number, reason: string): void {
+    this.sessions.delete(ws);
+    try {
+      if (this.socketIsOpen(ws) || ws.readyState === 0) {
+        ws.close(code, reason);
+      }
+    } catch {
+      // already closed
+    }
   }
 
   /**
@@ -861,9 +911,9 @@ export class Room extends DurableObject<Env> {
       doomed.push(ows);
     }
 
-    // Hibernated sockets may not be in the map yet
     for (const ows of this.ctx.getWebSockets()) {
       if (ows === keep || doomed.includes(ows)) continue;
+      if (!this.socketIsOpen(ows)) continue;
       const att = this.attachmentOf(ows);
       if (!att || att.clientKey !== key) continue;
       if (this.room.state.hostSessionId === att.sessionId) {
@@ -873,12 +923,7 @@ export class Room extends DurableObject<Env> {
     }
 
     for (const ows of doomed) {
-      this.sessions.delete(ows);
-      try {
-        ows.close(4000, "replaced");
-      } catch {
-        // already closed
-      }
+      this.closeSocket(ows, 4000, "replaced");
     }
 
     if (hostWasGhost || doomed.length > 0) {
@@ -896,17 +941,87 @@ export class Room extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Kick older sockets with the same nickname+platform that never sent a
+   * clientKey (pre-fix ghosts). Avoids stacking "Strange" rows after rejoin
+   * when only the new socket has a key.
+   */
+  private async kickOrphanNickTwins(
+    keep: WebSocket,
+    keepSession: SessionAttachment,
+  ): Promise<void> {
+    if (!this.room) return;
+    this.rebuildSessionsFromHibernation();
+    const nick = keepSession.nickname.trim().toLowerCase();
+    const plat = keepSession.platform ?? "";
+    if (!nick) return;
+
+    const doomed: WebSocket[] = [];
+    let hostWasGhost = false;
+
+    for (const [ows, os] of this.sessions) {
+      if (ows === keep) continue;
+      // Only orphans — never kick another real clientKey holder (2nd device)
+      if (os.clientKey) continue;
+      if (os.nickname.trim().toLowerCase() !== nick) continue;
+      if ((os.platform ?? "") !== plat) continue;
+      if (this.room.state.hostSessionId === os.sessionId) hostWasGhost = true;
+      doomed.push(ows);
+    }
+
+    for (const ows of doomed) {
+      this.closeSocket(ows, 4000, "orphan_replaced");
+    }
+
+    if (hostWasGhost && doomed.length > 0) {
+      this.room.state = {
+        ...this.room.state,
+        hostSessionId: keepSession.sessionId,
+        version: this.room.state.version + 1,
+        updatedAtMs: Date.now(),
+      };
+      this.room.hostGoneAtMs = null;
+      this.room.lastHostActivityAtMs = Date.now();
+      await this.persist();
+    }
+  }
+
+  /** Drop CLOSING/CLOSED entries and map junk so ghosts don't resurrect. */
+  private async pruneDeadSockets(): Promise<void> {
+    this.rebuildSessionsFromHibernation();
+    const dead: WebSocket[] = [];
+    for (const ws of this.sessions.keys()) {
+      if (!this.socketIsOpen(ws)) dead.push(ws);
+    }
+    for (const ws of this.ctx.getWebSockets()) {
+      if (!this.socketIsOpen(ws) && this.sessions.has(ws)) {
+        dead.push(ws);
+      }
+    }
+    for (const ws of dead) {
+      this.sessions.delete(ws);
+    }
+  }
+
   private liveMemberCount(): number {
     let n = 0;
     for (const s of this.sessions.values()) {
       if (s.helloDone) n++;
     }
-    return Math.max(n, this.sessions.size);
+    // Don't use sessions.size — half-open ghosts inflated "room full"
+    return n;
   }
 
-  /** Pull hibernation sockets back into the in-memory map (DO wake). */
+  /**
+   * Pull hibernation sockets back into the in-memory map (DO wake).
+   * Skips non-OPEN sockets so close()/kick can't be undone by rebuild.
+   */
   private rebuildSessionsFromHibernation(): void {
     for (const ws of this.ctx.getWebSockets()) {
+      if (!this.socketIsOpen(ws)) {
+        this.sessions.delete(ws);
+        continue;
+      }
       if (this.sessions.has(ws)) continue;
       const att = this.attachmentOf(ws);
       if (att) this.sessions.set(ws, att);
