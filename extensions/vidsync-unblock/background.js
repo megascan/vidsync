@@ -2,6 +2,8 @@
  * VidSync Unblock — service worker
  * Fetches media with extension host permissions (no page CORS).
  * Only answers messages from our content script on allowlisted VidSync origins.
+ *
+ * Chrome will not auto-open the action popup; use in-page UI + badge instead.
  */
 
 const ALLOWED_PAGE_ORIGINS = new Set([
@@ -29,7 +31,6 @@ function isHttpUrl(url) {
  * @param {chrome.runtime.MessageSender} sender
  */
 function senderAllowed(sender) {
-  // Content scripts: sender.id is this extension; url/origin is the page
   if (sender.id != null && sender.id !== chrome.runtime.id) return false;
   const pageUrl = sender.url ?? sender.origin ?? null;
   if (!pageUrl) return false;
@@ -53,7 +54,6 @@ function buildHeaders(headers) {
   for (const [k, v] of Object.entries(headers)) {
     if (typeof v !== "string") continue;
     const key = k.toLowerCase();
-    // Never forward cookie/auth from the page into arbitrary origins
     if (key === "cookie" || key === "authorization" || key === "cookie2") continue;
     try {
       h.set(k, v);
@@ -77,7 +77,43 @@ function bufferToBase64(buf) {
   return btoa(binary);
 }
 
+/**
+ * @param {number | undefined} tabId
+ * @param {boolean} active
+ */
+async function setTabBadge(tabId, active) {
+  if (tabId == null) return;
+  try {
+    if (active) {
+      await chrome.action.setBadgeText({ tabId, text: "ON" });
+      await chrome.action.setBadgeBackgroundColor({
+        tabId,
+        color: "#34d399",
+      });
+      await chrome.action.setTitle({
+        tabId,
+        title: "VidSync Unblock — active on this tab",
+      });
+    } else {
+      await chrome.action.setBadgeText({ tabId, text: "" });
+      await chrome.action.setTitle({
+        tabId,
+        title: "VidSync Unblock",
+      });
+    }
+  } catch {
+    // ignore
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Badge ping from content script (no media)
+  if (message?.type === "tab_active") {
+    void setTabBadge(sender.tab?.id, Boolean(message.active));
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (!senderAllowed(sender)) {
     sendResponse({ ok: false, error: "forbidden_sender" });
     return false;
@@ -89,6 +125,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "ping") {
+    void setTabBadge(sender.tab?.id, true);
     sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
     return false;
   }
@@ -100,6 +137,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   sendResponse({ ok: false, error: "unknown_type" });
   return false;
+});
+
+// Clear badge when leaving VidSync tabs
+chrome.tabs.onUpdated.addListener((tabId, _info, tab) => {
+  const url = tab.url ?? "";
+  const onVid =
+    url.startsWith("https://vidsync.ratt.ing") ||
+    url.startsWith("http://localhost:4321") ||
+    url.startsWith("http://127.0.0.1:4321");
+  void setTabBadge(tabId, onVid);
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  void chrome.tabs.get(activeInfo.tabId).then((tab) => {
+    const url = tab.url ?? "";
+    const onVid =
+      url.startsWith("https://vidsync.ratt.ing") ||
+      url.startsWith("http://localhost:4321") ||
+      url.startsWith("http://127.0.0.1:4321");
+    void setTabBadge(activeInfo.tabId, onVid);
+  });
 });
 
 /**

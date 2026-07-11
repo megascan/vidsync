@@ -1,13 +1,12 @@
 {
   "manifest_version": 3,
   "name": "VidSync Unblock",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Optional helper for VidSync: fetch media without CORS so watch rooms can play stubborn streams. Only runs on VidSync.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "tabs"],
   "host_permissions": ["*://*/*"],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {

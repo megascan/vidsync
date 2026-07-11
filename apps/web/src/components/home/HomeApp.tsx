@@ -7,6 +7,7 @@ import {
 } from "../../lib/nickname";
 import { isValidRoomCode, normalizeRoomCode } from "../../lib/roomCode";
 import Turnstile from "../Turnstile";
+import UnblockHomeBanner from "./UnblockHomeBanner";
 
 export default function HomeApp() {
   const [nickname, setNickname] = useState("");
@@ -78,6 +79,7 @@ export default function HomeApp() {
 
   return (
     <div className="flex flex-col gap-6">
+      <UnblockHomeBanner />
       <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h2 className="text-sm font-medium">Your nickname</h2>
         <p className="mt-1 text-xs text-[var(--color-muted)]">

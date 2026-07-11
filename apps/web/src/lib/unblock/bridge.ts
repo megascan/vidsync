@@ -19,13 +19,25 @@ export type UnblockFetchError = {
 export type UnblockFetchResponse = UnblockFetchResult | UnblockFetchError;
 
 type Pending = {
-  resolve: (v: UnblockFetchResponse | { ok: true; version: string | null }) => void;
+  resolve: (
+    v: UnblockFetchResponse | { ok: true; version: string | null },
+  ) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 };
 
 const pending = new Map<string, Pending>();
 let listening = false;
+
+declare global {
+  interface Window {
+    __VIDSYNC_UNBLOCK__?: {
+      version?: string;
+      ready?: boolean;
+      channel?: string;
+    };
+  }
+}
 
 function ensureListener(): void {
   if (listening || typeof window === "undefined") return;
@@ -36,16 +48,32 @@ function ensureListener(): void {
       channel?: string;
       direction?: string;
       id?: string;
+      type?: string;
+      version?: string;
       ok?: boolean;
       [key: string]: unknown;
     } | null;
-    if (!data || data.channel !== CHANNEL || data.direction !== "response") return;
+    if (!data || data.channel !== CHANNEL) return;
+
+    // Extension ready broadcast (no id)
+    if (data.direction === "event" && data.type === "ready") {
+      window.dispatchEvent(
+        new CustomEvent("vidsync-unblock-ready", {
+          detail: { version: data.version ?? null, ready: true },
+        }),
+      );
+      return;
+    }
+
+    if (data.direction !== "response") return;
     if (typeof data.id !== "string") return;
     const p = pending.get(data.id);
     if (!p) return;
     clearTimeout(p.timer);
     pending.delete(data.id);
-    p.resolve(data as UnblockFetchResponse | { ok: true; version: string | null });
+    p.resolve(
+      data as UnblockFetchResponse | { ok: true; version: string | null },
+    );
   });
 }
 
@@ -63,7 +91,7 @@ function pageRequest(
     const id = requestId();
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error("VidSync Unblock timed out"));
+      reject(new Error("VidSync Unblock timed out — is the extension loaded?"));
     }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
     window.postMessage(
@@ -79,46 +107,51 @@ function pageRequest(
   });
 }
 
-/** True if content script marked the page (extension installed + allowed origin). */
+/** True if content script marked the page or MAIN-world flag is set. */
 export function isUnblockInstalled(): boolean {
-  if (typeof document === "undefined") return false;
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return false;
+  }
+  if (window.__VIDSYNC_UNBLOCK__?.ready) return true;
   return document.documentElement.dataset.vidsyncUnblock === "1";
 }
 
 export function getUnblockVersion(): string | null {
-  if (typeof document === "undefined") return null;
-  return document.documentElement.dataset.vidsyncUnblockVersion ?? null;
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return null;
+  }
+  return (
+    window.__VIDSYNC_UNBLOCK__?.version ??
+    document.documentElement.dataset.vidsyncUnblockVersion ??
+    null
+  );
 }
 
+/**
+ * Always tries postMessage ping (even if dataset not set yet).
+ * Content script can answer without the SW if needed.
+ */
 export async function pingUnblock(): Promise<{
   ok: boolean;
   version: string | null;
 }> {
-  if (!isUnblockInstalled()) return { ok: false, version: null };
+  if (typeof window === "undefined") return { ok: false, version: null };
+  ensureListener();
   try {
-    const res = await requestIdPing();
-    return {
-      ok: Boolean(res && "ok" in res && res.ok),
-      version:
-        res && "version" in res && typeof res.version === "string"
-          ? res.version
-          : getUnblockVersion(),
-    };
+    const res = await pageRequest("ping", undefined, 2500);
+    const ok = Boolean(res && "ok" in res && res.ok);
+    const version =
+      res && "version" in res && typeof res.version === "string"
+        ? res.version
+        : getUnblockVersion();
+    return { ok, version };
   } catch {
+    // Fall back to passive markers
+    if (isUnblockInstalled()) {
+      return { ok: true, version: getUnblockVersion() };
+    }
     return { ok: false, version: null };
   }
-}
-
-async function requestIdPing() {
-  return requestRequest("ping", undefined, 5000);
-}
-
-async function requestRequest(
-  type: string,
-  payload?: Record<string, unknown>,
-  timeoutMs?: number,
-) {
-  return pageRequest(type, payload, timeoutMs);
 }
 
 export async function unblockFetch(
@@ -130,20 +163,25 @@ export async function unblockFetch(
     timeoutMs?: number;
   },
 ): Promise<UnblockFetchResponse> {
-  if (!isUnblockInstalled()) {
-    return { ok: false, error: "not_installed" };
+  try {
+    const res = await pageRequest(
+      "fetch",
+      {
+        url,
+        method: opts?.method ?? "GET",
+        headers: opts?.headers,
+        responseType: opts?.responseType,
+      },
+      opts?.timeoutMs ?? 120_000,
+    );
+    return res as UnblockFetchResponse;
+  } catch (e) {
+    return {
+      ok: false,
+      error: "bridge_timeout",
+      message: e instanceof Error ? e.message : "bridge timeout",
+    };
   }
-  const res = await requestRequest(
-    "fetch",
-    {
-      url,
-      method: opts?.method ?? "GET",
-      headers: opts?.headers,
-      responseType: opts?.responseType,
-    },
-    opts?.timeoutMs ?? 120_000,
-  );
-  return res as UnblockFetchResponse;
 }
 
 export function base64ToArrayBuffer(b64: string): ArrayBuffer {
@@ -161,23 +199,39 @@ export function base64ToBlob(
   return new Blob([base64ToArrayBuffer(b64)], { type: contentType });
 }
 
-/** Subscribe when extension injects late (rare). */
-export function onUnblockReady(cb: (version: string | null) => void): () => void {
+/** Subscribe when extension becomes ready; also polls for a few seconds. */
+export function onUnblockReady(
+  cb: (version: string | null) => void,
+): () => void {
   if (typeof window === "undefined") return () => undefined;
+
+  let stopped = false;
+  const fire = (v: string | null) => {
+    if (!stopped) cb(v);
+  };
+
   if (isUnblockInstalled()) {
-    cb(getUnblockVersion());
+    fire(getUnblockVersion());
   }
+
   const handler = (e: Event) => {
     const detail = (e as CustomEvent<{ version?: string }>).detail;
-    cb(detail?.version ?? getUnblockVersion());
+    fire(detail?.version ?? getUnblockVersion());
   };
   window.addEventListener("vidsync-unblock-ready", handler);
-  // poll dataset once shortly after load (content_scripts document_start races)
-  const t = window.setTimeout(() => {
-    if (isUnblockInstalled()) cb(getUnblockVersion());
-  }, 50);
+
+  // Aggressive poll — content script re-announces; SPA hydration races
+  const intervals = [50, 150, 400, 1000, 2000, 4000].map((ms) =>
+    window.setTimeout(() => {
+      void pingUnblock().then((r) => {
+        if (r.ok) fire(r.version);
+      });
+    }, ms),
+  );
+
   return () => {
-    window.clearTimeout(t);
+    stopped = true;
     window.removeEventListener("vidsync-unblock-ready", handler);
+    for (const t of intervals) window.clearTimeout(t);
   };
 }

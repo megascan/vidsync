@@ -6,10 +6,10 @@
     <title>VidSync Unblock</title>
     <style>
       body {
-        font: 13px/1.4 system-ui, sans-serif;
+        font: 13px/1.45 system-ui, sans-serif;
         margin: 0;
         padding: 12px 14px;
-        width: 260px;
+        width: 280px;
         color: #eef0f5;
         background: #0b0c0f;
       }
@@ -31,19 +31,37 @@
         font-weight: 600;
         font-size: 12px;
       }
+      .warn {
+        color: #fbbf24;
+        font-size: 11px;
+      }
+      button {
+        width: 100%;
+        margin-top: 6px;
+        padding: 8px 10px;
+        border: 0;
+        border-radius: 6px;
+        background: #6ee7b7;
+        color: #000;
+        font-weight: 600;
+        font-size: 12px;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
     <h1>VidSync Unblock</h1>
     <p class="ok" id="status">Ready</p>
+    <p class="warn">
+      Chrome won’t open this popup by itself when you visit VidSync — click the
+      puzzle/icon. On the site you should see “Unblock on” in the room header.
+    </p>
     <p>
-      Optional helper for
-      <a href="https://vidsync.ratt.ing" target="_blank" rel="noreferrer"
-        >vidsync.ratt.ing</a
-      >. Fetches media you queue so CORS is not your problem. Does not upload
-      files or touch other sites' UIs.
+      Fetches media you queue so CORS isn’t your problem. Does not upload
+      files.
     </p>
     <p id="ver"></p>
+    <button type="button" id="open">Open VidSync</button>
     <script src="popup.js"></script>
   </body>
 </html>

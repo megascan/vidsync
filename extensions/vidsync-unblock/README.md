@@ -14,9 +14,19 @@ Optional Chromium extension. Lets [VidSync](https://vidsync.ratt.ing) fetch queu
 
 1. Chrome/Edge → `chrome://extensions` → Developer mode
 2. **Load unpacked** → select this folder (`extensions/vidsync-unblock`)
-3. Open https://vidsync.ratt.ing — room UI should show **Unblock on**
+3. **Reload** any open VidSync tab (required after install/update)
+4. Open https://vidsync.ratt.ing — you should see:
+   - Home: green **Unblock active** banner
+   - Room: **Unblock on** pill + short toast
+   - Extension icon badge **ON** on that tab
 
-Firefox: use temporary add-on load (`about:debugging`) with the same folder (MV3).
+### Why the toolbar popup doesn’t open by itself
+
+Chrome blocks extensions from auto-opening their popup when you visit a site.
+Click the puzzle piece / Unblock icon if you want the popup. Day-to-day, the
+**site UI** is the interaction surface.
+
+Firefox: temporary add-on via `about:debugging` (MV3).
 
 ## Permissions
 
