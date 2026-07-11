@@ -55,7 +55,6 @@ type SyncEvent =
     }
   | { kind: "error"; code: string; message: string };
 
-// serde may emit camelCase or snake depending on field attrs — handle both
 function pick<T>(obj: Record<string, unknown>, ...keys: string[]): T | undefined {
   for (const k of keys) {
     if (k in obj) return obj[k] as T;
@@ -65,7 +64,12 @@ function pick<T>(obj: Record<string, unknown>, ...keys: string[]): T | undefined
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
-let apiBase = "https://api.vidsync.ratt.ing";
+const DEFAULT_API = "https://api.vidsync.ratt.ing";
+const STREAM_PORT = 8765;
+/** Always on — no UI toggle. */
+const USE_UPNP = true;
+
+let apiBase = DEFAULT_API;
 let nick = localStorage.getItem("vidsync.nick") || "";
 let roomCode = "";
 let isHost = false;
@@ -78,19 +82,17 @@ let error = "";
 let streamInfo: ServeInfo | null = null;
 let screen: "home" | "room" = "home";
 let joinCode = "";
-let port = "8765";
-let useUpnp = true;
 let busy = false;
 let clockOffsetMs = 0;
 let applyingRemote = false;
 let lastVersion = -1;
 let chatDraft = "";
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 const video = document.createElement("video");
 video.playsInline = true;
 video.controls = true;
-video.style.width = "100%";
-video.style.height = "100%";
+video.setAttribute("controlsList", "nodownload");
 
 function nowServer(): number {
   return Date.now() + clockOffsetMs;
@@ -108,12 +110,36 @@ function setStatus(s: string) {
 }
 
 function setError(e: string) {
-  error = e;
+  error = e.replace(/^Error:\s*/i, "");
   paint();
+}
+
+function toast(s: string) {
+  status = s;
+  error = "";
+  const el = app.querySelector("[data-flash]");
+  if (el) {
+    el.className = "flash ok";
+    el.textContent = s;
+  } else {
+    paint();
+  }
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    if (status === s) {
+      status = "";
+      const f = app.querySelector("[data-flash]");
+      if (f) f.textContent = "";
+    }
+  }, 2200);
 }
 
 function applyClock(serverTimeMs: number) {
   clockOffsetMs = serverTimeMs - Date.now();
+}
+
+function hasMedia(): boolean {
+  return Boolean(playback?.videoUrl);
 }
 
 async function applyState(state: PlaybackState, force: boolean) {
@@ -136,7 +162,10 @@ async function applyState(state: PlaybackState, force: boolean) {
         video.load();
       }
       const targetSec = expectedPos(state) / 1000;
-      if (Number.isFinite(targetSec) && Math.abs((video.currentTime || 0) - targetSec) > 0.4) {
+      if (
+        Number.isFinite(targetSec) &&
+        Math.abs((video.currentTime || 0) - targetSec) > 0.4
+      ) {
         video.currentTime = targetSec;
       }
       if (state.isPlaying) {
@@ -171,7 +200,6 @@ function wireVideoHostEvents() {
   };
 }
 
-// Heartbeat + follower drift
 setInterval(() => {
   if (screen !== "room" || !playback?.videoUrl) return;
   if (isHost && playback.isPlaying && !applyingRemote) {
@@ -188,7 +216,8 @@ setInterval(() => {
         applyingRemote = false;
       });
     }
-    if (playback.isPlaying && video.paused) void video.play().catch(() => undefined);
+    if (playback.isPlaying && video.paused)
+      void video.play().catch(() => undefined);
     if (!playback.isPlaying && !video.paused) video.pause();
   }
 }, 5000);
@@ -199,7 +228,6 @@ function normalizeEvent(raw: unknown): SyncEvent | null {
   const kind = (o.kind ?? o.type) as string;
   if (!kind) return null;
 
-  // Rust emits snake_case field names from SyncEvent + camelCase inside nested structs
   if (kind === "welcome") {
     return {
       kind: "welcome",
@@ -229,7 +257,9 @@ function normalizeEvent(raw: unknown): SyncEvent | null {
         sessionId: String(pick(message, "sessionId", "session_id") ?? ""),
         nickname: String(pick(message, "nickname") ?? ""),
         text: String(pick(message, "text") ?? ""),
-        serverTimeMs: Number(pick(message, "serverTimeMs", "server_time_ms") ?? 0),
+        serverTimeMs: Number(
+          pick(message, "serverTimeMs", "server_time_ms") ?? 0,
+        ),
       },
     };
   }
@@ -256,10 +286,10 @@ async function onSync(raw: unknown) {
 
   switch (ev.kind) {
     case "connected":
-      setStatus("Connected");
+      status = "";
       break;
     case "disconnected":
-      setError(`Disconnected: ${ev.reason}`);
+      setError("Connection lost");
       break;
     case "welcome":
       sessionId = ev.session_id;
@@ -267,7 +297,9 @@ async function onSync(raw: unknown) {
       members = ev.members;
       applyClock(ev.server_time_ms);
       await applyState(ev.state, true);
-      setStatus(isHost ? "You are host" : "Joined as viewer");
+      status = "";
+      error = "";
+      paint();
       break;
     case "state":
       applyClock(ev.server_time_ms);
@@ -284,7 +316,7 @@ async function onSync(raw: unknown) {
       paint();
       break;
     case "error":
-      setError(`${ev.code}: ${ev.message}`);
+      setError(ev.message || ev.code);
       break;
   }
 }
@@ -301,9 +333,10 @@ async function doCreate() {
     });
     roomCode = code;
     screen = "room";
-    setStatus(`Room ${code}`);
+    status = "";
+    error = "";
   } catch (e) {
-    setError(String(e));
+    setError(friendlyErr(e));
   } finally {
     busy = false;
     paint();
@@ -324,9 +357,10 @@ async function doJoin() {
     });
     roomCode = code;
     screen = "room";
-    setStatus(`Joined ${code}`);
+    status = "";
+    error = "";
   } catch (e) {
-    setError(String(e));
+    setError(friendlyErr(e));
   } finally {
     busy = false;
     paint();
@@ -347,9 +381,11 @@ async function doLeave() {
   playback = null;
   chat = [];
   streamInfo = null;
+  status = "";
+  error = "";
   video.removeAttribute("src");
   video.load();
-  setStatus("Left room");
+  paint();
 }
 
 async function doStreamFile() {
@@ -365,19 +401,19 @@ async function doStreamFile() {
   });
   if (!selected || typeof selected !== "string") return;
   busy = true;
-  setStatus("Starting stream…");
+  setStatus("Opening video…");
   try {
     const info = await invoke<ServeInfo>("stream_start", {
       path: selected,
-      port: Number(port) || 8765,
-      upnp: useUpnp,
+      port: STREAM_PORT,
+      upnp: USE_UPNP,
     });
     streamInfo = info;
     const url = info.publicUrl ?? info.lanUrl;
-    setStatus(`Streaming ${info.fileName}`);
     await navigator.clipboard.writeText(url).catch(() => undefined);
+    toast(`Playing ${info.fileName}`);
   } catch (e) {
-    setError(String(e));
+    setError(friendlyErr(e));
   } finally {
     busy = false;
     paint();
@@ -391,22 +427,37 @@ async function doChat() {
   try {
     await invoke("room_chat", { text: t });
   } catch (e) {
-    setError(String(e));
+    setError(friendlyErr(e));
   }
   paint();
 }
 
 function copy(text: string) {
-  void navigator.clipboard.writeText(text).then(() => {
-    status = "Copied";
-    error = "";
-    const el = app.querySelector(".status");
-    if (el) el.textContent = status;
-    else paint();
-  });
+  void navigator.clipboard.writeText(text).then(
+    () => toast("Copied"),
+    () => setError("Could not copy"),
+  );
 }
 
-/** Event delegation — survives full re-renders without dead buttons. */
+function friendlyErr(e: unknown): string {
+  const s = String(e).replace(/^Error:\s*/i, "");
+  if (/timeout|network|fetch|connect/i.test(s)) return "Can't reach the server";
+  if (/not found|404|invalid_code/i.test(s)) return "Room not found";
+  if (/room_full/i.test(s)) return "Room is full";
+  return s.length > 120 ? `${s.slice(0, 120)}…` : s;
+}
+
+function shortUrl(u: string): string {
+  try {
+    const x = new URL(u);
+    const path =
+      x.pathname.length > 22 ? `${x.pathname.slice(0, 22)}…` : x.pathname;
+    return `${x.hostname}${path}`;
+  } catch {
+    return u.length > 40 ? `${u.slice(0, 40)}…` : u;
+  }
+}
+
 function bindUiOnce() {
   app.addEventListener("click", (e) => {
     const btn = (e.target as HTMLElement).closest("button");
@@ -439,7 +490,7 @@ function bindUiOnce() {
           positionMs: (video.currentTime || 0) * 1000,
         });
         break;
-      case "copyUrl":
+      case "copyShare":
         if (streamInfo) copy(streamInfo.publicUrl ?? streamInfo.lanUrl);
         break;
       case "send":
@@ -457,22 +508,14 @@ function bindUiOnce() {
       nick = el.value;
       const create = app.querySelector<HTMLButtonElement>("#create");
       if (create) create.disabled = busy || !nick.trim();
-    } else if (el.id === "api") {
-      apiBase = el.value;
     } else if (el.id === "join") {
-      joinCode = el.value;
+      joinCode = el.value.toUpperCase();
+      el.value = joinCode;
       const joinBtn = app.querySelector<HTMLButtonElement>("#joinBtn");
       if (joinBtn) joinBtn.disabled = busy || joinCode.trim().length < 6;
-    } else if (el.id === "port") {
-      port = el.value;
     } else if (el.id === "chat") {
       chatDraft = el.value;
     }
-  });
-
-  app.addEventListener("change", (e) => {
-    const t = e.target as HTMLInputElement;
-    if (t.id === "upnp") useUpnp = t.checked;
   });
 
   app.addEventListener("keydown", (e) => {
@@ -481,127 +524,191 @@ function bindUiOnce() {
       e.preventDefault();
       void doChat();
     }
+    if (e.key === "Enter" && t.id === "join") {
+      e.preventDefault();
+      void doJoin();
+    }
+    if (e.key === "Enter" && t.id === "nick" && !e.shiftKey) {
+      e.preventDefault();
+      void doCreate();
+    }
   });
 }
 
 function paint() {
   if (screen === "home") {
+    const flash = error
+      ? `<p class="flash err" data-flash>${escapeHtml(error)}</p>`
+      : status
+        ? `<p class="flash ok" data-flash>${escapeHtml(status)}</p>`
+        : `<p class="flash" data-flash></p>`;
+
     app.innerHTML = `
       <div class="screen home">
-        <h1>VidSync</h1>
-        <p class="sub">Desktop watch party — lobby, stream, native player. No browser extension.</p>
-        <div class="field">
-          <label>Nickname</label>
-          <input id="nick" value="${escapeAttr(nick)}" ${busy ? "disabled" : ""} />
-        </div>
-        <div class="field">
-          <label>API</label>
-          <input id="api" value="${escapeAttr(apiBase)}" ${busy ? "disabled" : ""} />
-        </div>
-        <button type="button" class="primary" id="create" ${busy || !nick.trim() ? "disabled" : ""}>Create room</button>
-        <div class="field" style="margin-top:0.5rem">
-          <label>Or join</label>
-          <div class="row">
-            <input id="join" placeholder="ROOMCODE" value="${escapeAttr(joinCode)}" ${busy ? "disabled" : ""} />
-            <button type="button" id="joinBtn" ${busy || joinCode.trim().length < 6 ? "disabled" : ""}>Join</button>
+        <div class="home-card">
+          <div class="brand">
+            <h1 class="brand-mark">VidSync</h1>
+            <p class="brand-tag">Watch together. One room, one stream.</p>
+          </div>
+          <div class="stack">
+            <label class="field">
+              <span>Name</span>
+              <input id="nick" autocomplete="nickname" maxlength="24"
+                placeholder="How you show up"
+                value="${escapeAttr(nick)}" ${busy ? "disabled" : ""} />
+            </label>
+            <button type="button" class="primary" id="create"
+              ${busy || !nick.trim() ? "disabled" : ""}>
+              ${busy && status.includes("Creating") ? "Creating…" : "New room"}
+            </button>
+            <div class="divider">or join</div>
+            <div class="join-row">
+              <input id="join" autocomplete="off" spellcheck="false"
+                placeholder="Room code"
+                value="${escapeAttr(joinCode)}" ${busy ? "disabled" : ""} />
+              <button type="button" id="joinBtn"
+                ${busy || joinCode.trim().length < 6 ? "disabled" : ""}>
+                Join
+              </button>
+            </div>
+            ${flash}
           </div>
         </div>
-        ${status ? `<p class="status">${escapeHtml(status)}</p>` : ""}
-        ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       </div>`;
     return;
   }
 
-  // Room
-  const url = playback?.videoUrl ?? "";
+  const media = hasMedia();
+  const fileLabel = streamInfo?.fileName ?? "";
+  const emptyCopy = isHost
+    ? {
+        title: "Nothing playing",
+        body: "Open a video file to start the room.",
+      }
+    : {
+        title: "Waiting for host",
+        body: "Video shows up here when they start streaming.",
+      };
+
+  const flashBar = error
+    ? `<span class="bar-meta err">${escapeHtml(error)}</span>`
+    : status
+      ? `<span class="bar-meta">${escapeHtml(status)}</span>`
+      : "";
+
   app.innerHTML = `
     <div class="screen">
       <header class="room-header">
-        <div class="row">
-          <h2>${escapeHtml(roomCode)}</h2>
-          ${isHost ? `<span class="badge">HOST</span>` : `<span class="muted">viewer</span>`}
+        <div class="room-id">
+          <code>${escapeHtml(roomCode)}</code>
+          <span class="pill ${isHost ? "host" : "viewer"}">${isHost ? "Host" : "Watching"}</span>
         </div>
-        <div class="row">
-          <button type="button" id="copyCode">Copy code</button>
-          <button type="button" id="leave">Leave</button>
+        <div class="header-actions">
+          <button type="button" class="ghost" id="copyCode">Copy code</button>
+          <button type="button" class="ghost" id="leave">Leave</button>
         </div>
       </header>
       <div class="room-body">
         <div class="player-pane">
-          <div id="videoMount" style="flex:1;min-height:0;display:flex;background:#000"></div>
+          <div class="video-shell" id="videoMount">
+            ${
+              !media
+                ? `<div class="video-empty">
+                    <strong>${escapeHtml(emptyCopy.title)}</strong>
+                    <span>${escapeHtml(emptyCopy.body)}</span>
+                  </div>`
+                : ""
+            }
+          </div>
           <div class="player-bar">
             ${
               isHost
                 ? `
-              <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>Stream local file…</button>
-              <label class="muted"><input type="checkbox" id="upnp" ${useUpnp ? "checked" : ""}/> UPnP</label>
-              <input id="port" value="${escapeAttr(port)}" style="width:4.5rem" title="Port" />
-              <button type="button" id="play">Play</button>
-              <button type="button" id="pause">Pause</button>
+              <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>
+                ${media ? "Open video…" : "Open video…"}
+              </button>
+              <button type="button" id="play" ${!media || busy ? "disabled" : ""}>Play</button>
+              <button type="button" id="pause" ${!media || busy ? "disabled" : ""}>Pause</button>
             `
-                : `<span class="muted">Host controls playback</span>`
+                : `<span class="bar-meta">${media ? "Synced to host" : "Waiting…"}</span>`
             }
-            ${status ? `<span class="status">${escapeHtml(status)}</span>` : ""}
-            ${error ? `<span class="error">${escapeHtml(error)}</span>` : ""}
+            <span class="spacer"></span>
+            ${flashBar}
           </div>
           ${
             streamInfo
-              ? `<div style="padding:0.4rem 0.75rem;background:var(--surface);border-top:1px solid var(--border)">
-                  <div class="muted">Stream URL ${streamInfo.upnpMapped ? "(UPnP open)" : "(forward port if remote)"}</div>
-                  <div class="mono" id="streamUrl">${escapeHtml(streamInfo.publicUrl ?? streamInfo.lanUrl)}</div>
-                  <button type="button" id="copyUrl" style="margin-top:0.35rem">Copy URL</button>
+              ? `<div class="share-strip">
+                  <span class="label">Sharing</span>
+                  <span class="name" title="${escapeAttr(streamInfo.publicUrl ?? streamInfo.lanUrl)}">${escapeHtml(fileLabel || "stream")}</span>
+                  <button type="button" class="ghost" id="copyShare">Copy link</button>
                 </div>`
               : ""
           }
-          ${url ? `<div class="mono" style="padding:0.35rem 0.75rem">Now: ${escapeHtml(url)}</div>` : ""}
         </div>
         <aside class="side">
-          <section>
-            <h3>In room (${members.length})</h3>
-            <ul>
-              ${members
-                .map(
-                  (m) =>
-                    `<li>${escapeHtml(m.nickname)}${m.isHost ? " · host" : ""}${
-                      m.sessionId === sessionId ? " ★" : ""
-                    }</li>`,
-                )
-                .join("")}
+          <div class="panel">
+            <p class="panel-title">People · ${members.length}</p>
+            <ul class="people">
+              ${
+                members
+                  .map((m) => {
+                    const you = m.sessionId === sessionId;
+                    return `<li>
+                      <span class="${you ? "you" : ""}">${escapeHtml(m.nickname)}${you ? " (you)" : ""}</span>
+                      ${m.isHost ? `<span class="tag">host</span>` : ""}
+                    </li>`;
+                  })
+                  .join("") || `<li class="empty">…</li>`
+              }
             </ul>
-          </section>
-          <section>
-            <h3>Queue</h3>
-            <ul>
-              ${(playback?.queue ?? [])
-                .map((u, i) => {
-                  const active = playback?.queueIndex === i;
-                  const short = u.length > 36 ? `${u.slice(0, 36)}…` : u;
-                  return `<li class="mono">${active ? "▶ " : "· "}${escapeHtml(short)}</li>`;
-                })
-                .join("") || `<li class="muted">Empty</li>`}
+          </div>
+          <div class="panel">
+            <p class="panel-title">Queue</p>
+            <ul class="queue">
+              ${
+                (playback?.queue ?? [])
+                  .map((u, i) => {
+                    const active = playback?.queueIndex === i;
+                    return `<li class="${active ? "active" : ""}">
+                      <span class="dot">${active ? "●" : "○"}</span>
+                      <span class="qtext" title="${escapeAttr(u)}">${escapeHtml(shortUrl(u))}</span>
+                    </li>`;
+                  })
+                  .join("") || `<li class="empty" style="color:var(--faint)">Empty</li>`
+              }
             </ul>
-          </section>
-          <section style="flex:1;display:flex;flex-direction:column;min-height:0;border-bottom:none">
-            <h3>Chat</h3>
+          </div>
+          <div class="panel chat-panel">
+            <p class="panel-title">Chat</p>
             <div class="chat-log" id="chatLog">
-              ${chat
-                .map(
-                  (c) =>
-                    `<div class="line"><span class="nick">${escapeHtml(c.nick)}</span>: ${escapeHtml(c.text)}</div>`,
-                )
-                .join("") || `<div class="muted">No messages</div>`}
+              ${
+                chat
+                  .map(
+                    (c) =>
+                      `<div class="line"><span class="nick">${escapeHtml(c.nick)}</span>${escapeHtml(c.text)}</div>`,
+                  )
+                  .join("") || `<div class="empty">Say something</div>`
+              }
             </div>
-            <div class="row" style="margin-top:0.4rem">
-              <input id="chat" placeholder="Message…" value="${escapeAttr(chatDraft)}" />
-              <button type="button" id="send">Send</button>
+            <div class="chat-compose">
+              <input id="chat" maxlength="280" placeholder="Message"
+                value="${escapeAttr(chatDraft)}" ${busy ? "disabled" : ""} />
+              <button type="button" id="send" ${busy ? "disabled" : ""}>Send</button>
             </div>
-          </section>
+          </div>
         </aside>
       </div>
     </div>`;
 
   const mount = app.querySelector("#videoMount");
-  if (mount) mount.appendChild(video);
+  if (mount && media) {
+    // remove empty overlay if present when mounting video
+    const empty = mount.querySelector(".video-empty");
+    empty?.remove();
+    mount.appendChild(video);
+  } else if (mount && !media) {
+    video.remove();
+  }
 
   const log = app.querySelector("#chatLog");
   if (log) log.scrollTop = log.scrollHeight;
@@ -625,7 +732,7 @@ async function boot() {
   try {
     apiBase = await invoke<string>("default_api");
   } catch {
-    /* use default */
+    apiBase = DEFAULT_API;
   }
   await listen("sync-event", (e) => {
     void onSync(e.payload);
