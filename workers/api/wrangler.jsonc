@@ -4,6 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-04-07",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
   "vars": {
     "WEB_ORIGIN": "https://vidsync.ratt.ing"
   },
