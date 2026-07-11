@@ -401,10 +401,16 @@ async fn run_ffmpeg(
     }
 
     let ffmpeg = resolve_bin(settings, "ffmpeg");
+    // -progress pipe:1 → newline key=value on stdout (reliable %).
+    // Default stderr stats use \r and line readers almost never see time=.
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-nostdin".into(),
         "-y".into(),
+        "-stats_period".into(),
+        "0.25".into(),
+        "-progress".into(),
+        "pipe:1".into(),
         "-i".into(),
         input.display().to_string(),
     ];
@@ -414,18 +420,17 @@ async fn run_ffmpeg(
     args.push(out.display().to_string());
 
     info!("ffmpeg {} {:?}", ffmpeg.display(), args);
-    emit_progress(
-        app,
-        "ffmpeg",
-        &format!("Running ffmpeg ({tag})…"),
-        Some(12),
-    )
-    .await;
+    let kind = if tag.contains("x264") || tag == "transcode" {
+        "Transcoding"
+    } else {
+        "Remuxing"
+    };
+    emit_progress(app, "ffmpeg", &format!("{kind}…"), Some(2)).await;
 
     let mut cmd = Command::new(&ffmpeg);
     cmd.args(&args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     apply_no_window(&mut cmd);
 
@@ -433,13 +438,40 @@ async fn run_ffmpeg(
         .spawn()
         .with_context(|| format!("spawn ffmpeg {}", ffmpeg.display()))?;
 
-    let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
-    let mut lines = BufReader::new(stderr).lines();
+    // Drain stderr so the pipe never blocks ffmpeg
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(_)) = lines.next_line().await {}
+        });
+    }
+
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    let mut lines = BufReader::new(stdout).lines();
+    let app_progress = app.clone();
+    let dur = duration_secs;
 
     let wait_fut = async {
+        let mut last_pct: u32 = 2;
+        let mut last_emit = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(std::time::Instant::now);
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(pct) = parse_ffmpeg_pct(&line, duration_secs) {
-                emit_progress(app, "progress", &trim_ffmpeg_line(&line), Some(pct)).await;
+            if let Some(pct) = parse_progress_line(&line, dur) {
+                // Throttle UI spam; always allow 100/end
+                let now = std::time::Instant::now();
+                if pct >= 99
+                    || pct > last_pct
+                        && now.duration_since(last_emit) >= Duration::from_millis(200)
+                {
+                    last_pct = pct.max(last_pct);
+                    last_emit = now;
+                    let msg = format!("{kind}… {last_pct}%");
+                    emit_progress(&app_progress, "progress", &msg, Some(last_pct)).await;
+                }
+            } else if line.trim() == "progress=end" {
+                emit_progress(&app_progress, "progress", &format!("{kind}… 100%"), Some(100))
+                    .await;
             }
         }
         child.wait().await.context("wait ffmpeg")
@@ -461,33 +493,46 @@ async fn run_ffmpeg(
     if !out.is_file() {
         bail!("ffmpeg produced no output");
     }
+    emit_progress(app, "done", "Ready", Some(100)).await;
     Ok(out)
 }
 
-fn trim_ffmpeg_line(line: &str) -> String {
-    let t = line.trim();
-    if t.len() > 80 {
-        format!("{}…", &t[..80])
-    } else {
-        t.to_string()
-    }
-}
-
-fn parse_ffmpeg_pct(line: &str, duration_secs: Option<f64>) -> Option<u32> {
-    let idx = line.find("time=")?;
-    let rest = &line[idx + 5..];
-    let token = rest.split_whitespace().next()?;
-    let parts: Vec<_> = token.split(':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let h: f64 = parts[0].parse().ok()?;
-    let m: f64 = parts[1].parse().ok()?;
-    let s: f64 = parts[2].parse().ok()?;
-    let t = h * 3600.0 + m * 60.0 + s;
+/// Parse `-progress pipe:1` key=value lines into 0–99 (100 reserved for done).
+fn parse_progress_line(line: &str, duration_secs: Option<f64>) -> Option<u32> {
+    let line = line.trim();
     let dur = duration_secs.filter(|d| *d > 0.5)?;
-    let pct = ((t / dur) * 100.0).clamp(0.0, 99.0) as u32;
-    Some(pct)
+
+    // Prefer out_time_ms (microseconds despite the name) / out_time_us
+    if let Some(rest) = line.strip_prefix("out_time_ms=") {
+        let us: f64 = rest.trim().parse().ok()?;
+        if us < 0.0 {
+            return None;
+        }
+        let t = us / 1_000_000.0;
+        return Some(((t / dur) * 100.0).clamp(0.0, 99.0) as u32);
+    }
+    if let Some(rest) = line.strip_prefix("out_time_us=") {
+        let us: f64 = rest.trim().parse().ok()?;
+        if us < 0.0 {
+            return None;
+        }
+        let t = us / 1_000_000.0;
+        return Some(((t / dur) * 100.0).clamp(0.0, 99.0) as u32);
+    }
+    if let Some(rest) = line.strip_prefix("out_time=") {
+        // HH:MM:SS.microseconds
+        let token = rest.trim();
+        let parts: Vec<_> = token.split(':').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let h: f64 = parts[0].parse().ok()?;
+        let m: f64 = parts[1].parse().ok()?;
+        let s: f64 = parts[2].parse().ok()?;
+        let t = h * 3600.0 + m * 60.0 + s;
+        return Some(((t / dur) * 100.0).clamp(0.0, 99.0) as u32);
+    }
+    None
 }
 
 fn shell_split(s: &str) -> Vec<String> {

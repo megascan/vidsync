@@ -176,6 +176,10 @@ let busy = false;
 let mediaSettings: MediaSettings | null = null;
 let ffmpegInfo: FfmpegStatus | null = null;
 let prepareStatus = "";
+/** Host FFmpeg prepare overlay (not live yet — full-file remux/transcode). */
+let prepareActive = false;
+/** 0–100 when known; null = indeterminate. */
+let preparePct: number | null = null;
 /** Avoid full DOM rebuild while video is playing (reparent = flicker). */
 let roomShellReady = false;
 /** Follower: waiting for HTTP buffer before chasing host (remote peers). */
@@ -603,11 +607,12 @@ function syncVideoMount() {
 /** Host player controls — rebuilt on soft paint when role / media changes. */
 function hostPlayerBarHtml(): string {
   const media = hasMedia();
+  const lock = busy || prepareActive;
   return `
-    <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>Play media…</button>
-    <button type="button" id="queueAdd" ${busy ? "disabled" : ""}>Add to queue</button>
-    <button type="button" id="play" ${!media || busy ? "disabled" : ""}>Play</button>
-    <button type="button" id="pause" ${!media || busy ? "disabled" : ""}>Pause</button>
+    <button type="button" class="primary" id="stream" ${lock ? "disabled" : ""}>Play media…</button>
+    <button type="button" id="queueAdd" ${lock ? "disabled" : ""}>Add to queue</button>
+    <button type="button" id="play" ${!media || lock ? "disabled" : ""}>Play</button>
+    <button type="button" id="pause" ${!media || lock ? "disabled" : ""}>Pause</button>
     <span class="spacer"></span>
     <span class="bar-meta" data-flash-bar></span>
   `;
@@ -623,12 +628,100 @@ function viewerPlayerBarHtml(): string {
 
 function flashBarText(): { text: string; err: boolean } {
   if (error) return { text: error, err: true };
+  if (prepareActive) {
+    const pct =
+      preparePct != null ? ` ${Math.round(preparePct)}%` : "";
+    return {
+      text: prepareStatus || `Preparing…${pct}`,
+      err: false,
+    };
+  }
   if (prepareStatus) return { text: prepareStatus, err: false };
   if (status) return { text: status, err: false };
   if (!isHost) {
     return { text: hasMedia() ? "Synced to host" : "Waiting…", err: false };
   }
   return { text: "", err: false };
+}
+
+function prepareOverlayHtml(): string {
+  if (!prepareActive) return "";
+  const pct = preparePct;
+  const pctLabel =
+    pct != null && Number.isFinite(pct) ? `${Math.round(pct)}%` : "…";
+  const fill =
+    pct != null && Number.isFinite(pct)
+      ? `style="width:${Math.max(0, Math.min(100, pct))}%"`
+      : `style="width:30%" class="indeterminate"`;
+  const msg = prepareStatus || "Preparing media…";
+  return `<div class="prepare-overlay" data-prepare aria-live="polite" aria-busy="true">
+    <div class="prepare-card">
+      <strong>Preparing media</strong>
+      <span class="prepare-msg">${escapeHtml(msg)}</span>
+      <div class="prepare-bar" role="progressbar"
+        aria-valuemin="0" aria-valuemax="100"
+        ${pct != null ? `aria-valuenow="${Math.round(pct)}"` : `aria-valuetext="working"`}>
+        <div class="prepare-fill" ${fill}></div>
+      </div>
+      <span class="prepare-pct">${escapeHtml(pctLabel)}</span>
+      <span class="prepare-hint">Wait for convert — not live/stream encode yet</span>
+    </div>
+  </div>`;
+}
+
+function syncPrepareOverlay() {
+  const shell = app.querySelector(".video-shell") ?? app.querySelector("#videoMount");
+  if (!shell) return;
+  let el = shell.querySelector<HTMLElement>("[data-prepare]");
+  if (!prepareActive) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    shell.insertAdjacentHTML("beforeend", prepareOverlayHtml());
+    return;
+  }
+  // Update in place
+  const msg = el.querySelector(".prepare-msg");
+  const pctEl = el.querySelector(".prepare-pct");
+  const fill = el.querySelector<HTMLElement>(".prepare-fill");
+  const bar = el.querySelector(".prepare-bar");
+  if (msg) msg.textContent = prepareStatus || "Preparing media…";
+  if (pctEl) {
+    pctEl.textContent =
+      preparePct != null && Number.isFinite(preparePct)
+        ? `${Math.round(preparePct)}%`
+        : "…";
+  }
+  if (fill) {
+    if (preparePct != null && Number.isFinite(preparePct)) {
+      fill.classList.remove("indeterminate");
+      fill.style.width = `${Math.max(0, Math.min(100, preparePct))}%`;
+    } else {
+      fill.classList.add("indeterminate");
+      fill.style.width = "30%";
+    }
+  }
+  if (bar && preparePct != null) {
+    bar.setAttribute("aria-valuenow", String(Math.round(preparePct)));
+  }
+}
+
+function beginPrepare(label: string) {
+  prepareActive = true;
+  preparePct = 0;
+  prepareStatus = label;
+  status = label;
+  error = "";
+  syncPrepareOverlay();
+  softPaintRoom();
+}
+
+function endPrepare() {
+  prepareActive = false;
+  preparePct = null;
+  prepareStatus = "";
+  syncPrepareOverlay();
 }
 
 /** Last role used to build the room shell (detect host flip for full rebuild). */
@@ -1189,12 +1282,12 @@ async function pickVideoFile(): Promise<string | null> {
 
 /** Open file and switch room to it (adds to queue). */
 async function doStreamFile() {
-  if (!isHost || busy) return;
+  if (!isHost || busy || prepareActive) return;
   const path = await pickVideoFile();
   if (!path) return;
   busy = true;
-  prepareStatus = "";
-  setStatus("Preparing video…");
+  beginPrepare("Preparing video…");
+  paint(); // lock host controls + show overlay shell
   try {
     const info = await invoke<ServeInfo>("stream_start", {
       path,
@@ -1202,7 +1295,7 @@ async function doStreamFile() {
       upnp: USE_UPNP,
     });
     streamInfo = info;
-    prepareStatus = "";
+    endPrepare();
     applyingRemote = true;
     try {
       await loadVideoSrc(info.publicUrl ?? info.lanUrl);
@@ -1212,7 +1305,7 @@ async function doStreamFile() {
     }
     toast(info.fileName);
   } catch (e) {
-    prepareStatus = "";
+    endPrepare();
     setError(friendlyErr(e));
   } finally {
     busy = false;
@@ -1222,19 +1315,19 @@ async function doStreamFile() {
 
 /** Add file to queue without forcing a switch (unless nothing playing). */
 async function doQueueAdd() {
-  if (!isHost || busy) return;
+  if (!isHost || busy || prepareActive) return;
   const path = await pickVideoFile();
   if (!path) return;
   busy = true;
-  prepareStatus = "";
-  setStatus("Preparing video…");
+  beginPrepare("Preparing for queue…");
+  paint();
   try {
     const info = await invoke<ServeInfo>("queue_add_file", { path });
     streamInfo = info;
-    prepareStatus = "";
+    endPrepare();
     toast(`Queued ${info.fileName}`);
   } catch (e) {
-    prepareStatus = "";
+    endPrepare();
     setError(friendlyErr(e));
   } finally {
     busy = false;
@@ -1762,7 +1855,22 @@ function softPaintRoom() {
     pill.textContent = isHost ? "Host" : "Watching";
   }
 
+  // Host controls stay locked while FFmpeg runs
+  if (isHost) {
+    const lock = busy || prepareActive;
+    const media = hasMedia();
+    for (const id of ["stream", "queueAdd"] as const) {
+      const b = app.querySelector<HTMLButtonElement>(`#${id}`);
+      if (b) b.disabled = lock;
+    }
+    const play = app.querySelector<HTMLButtonElement>("#play");
+    const pause = app.querySelector<HTMLButtonElement>("#pause");
+    if (play) play.disabled = !media || lock;
+    if (pause) pause.disabled = !media || lock;
+  }
+
   syncVideoMount();
+  syncPrepareOverlay();
 }
 
 function paint() {
@@ -1883,15 +1991,16 @@ function paint() {
                   </div>`
                 : ""
             }
+            ${prepareOverlayHtml()}
           </div>
           <div class="player-bar">
             ${
               isHost
                 ? `
-              <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>Play media…</button>
-              <button type="button" id="queueAdd" ${busy ? "disabled" : ""}>Add to queue</button>
-              <button type="button" id="play" ${!media || busy ? "disabled" : ""}>Play</button>
-              <button type="button" id="pause" ${!media || busy ? "disabled" : ""}>Pause</button>
+              <button type="button" class="primary" id="stream" ${busy || prepareActive ? "disabled" : ""}>Play media…</button>
+              <button type="button" id="queueAdd" ${busy || prepareActive ? "disabled" : ""}>Add to queue</button>
+              <button type="button" id="play" ${!media || busy || prepareActive ? "disabled" : ""}>Play</button>
+              <button type="button" id="pause" ${!media || busy || prepareActive ? "disabled" : ""}>Pause</button>
               <span class="spacer"></span>
               ${flashSlot}
             `
@@ -2084,17 +2193,34 @@ async function boot() {
       message?: string;
       pct?: number | null;
     };
-    const pct =
-      p.pct != null && Number.isFinite(p.pct) ? ` ${p.pct}%` : "";
-    prepareStatus = `${p.message || p.phase || "Working…"}${pct}`;
+    const phase = (p.phase || "").toLowerCase();
+    const terminal = ["done", "skip", "fallback", "cache"].includes(phase);
+    if (p.pct != null && Number.isFinite(p.pct)) {
+      preparePct = Math.max(0, Math.min(100, Number(p.pct)));
+    }
+    prepareStatus = p.message || p.phase || "Working…";
     status = prepareStatus;
+    // Keep overlay up through convert; cache-hit 100% is instant, still flash bar
+    if (!terminal || (preparePct != null && preparePct < 100)) {
+      prepareActive = true;
+    }
+    if (terminal && (preparePct == null || preparePct >= 100)) {
+      // Don't clear active mid-command — doStreamFile finally handles end.
+      // Just pin bar at 100 for cache/skip so user sees completion.
+      if (phase === "cache" || phase === "done") {
+        preparePct = 100;
+      }
+    }
     // Soft update only — full paint during prepare would thrash
-    const el = app.querySelector(".bar-meta");
+    syncPrepareOverlay();
+    const el =
+      app.querySelector("[data-flash-bar]") ?? app.querySelector(".bar-meta");
     if (el) {
       el.className = "bar-meta";
-      el.textContent = prepareStatus;
-    } else if (screen === "room") {
-      softPaintRoom();
+      el.textContent =
+        preparePct != null
+          ? `${prepareStatus}`
+          : prepareStatus;
     }
   });
   paint();
