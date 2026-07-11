@@ -91,6 +91,8 @@ let applyingRemote = false;
 let lastVersion = -1;
 let chatDraft = "";
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+/** Bumps when a newer applyState supersedes an in-flight one (join races). */
+let applyGen = 0;
 
 /** In-app auto-update (Tauri signed releases). */
 type UpdateUi =
@@ -107,7 +109,10 @@ let updateBusy = false;
 const video = document.createElement("video");
 video.playsInline = true;
 video.controls = true;
+video.preload = "auto";
 video.setAttribute("controlsList", "nodownload");
+// Helps WebKit avoid some opaque cross-origin range edge cases
+video.crossOrigin = "anonymous";
 
 function nowServer(): number {
   return Date.now() + clockOffsetMs;
@@ -158,6 +163,7 @@ function hasMedia(): boolean {
 }
 
 async function applyState(state: PlaybackState, force: boolean) {
+  const gen = ++applyGen;
   const prevUrl = playback?.videoUrl ?? null;
   const urlChanged = prevUrl !== state.videoUrl;
   const ver = state.version;
@@ -174,34 +180,54 @@ async function applyState(state: PlaybackState, force: boolean) {
   if (drive && state.videoUrl) {
     applyingRemote = true;
     try {
-      if (urlChanged || force || !video.src || !video.src.includes(tokenFromUrl(state.videoUrl))) {
+      // Mount before load — WebKitGTK is flaky decoding fully detached <video>
+      ensureVideoMounted();
+      const needLoad =
+        urlChanged ||
+        force ||
+        !video.src ||
+        !video.src.includes(tokenFromUrl(state.videoUrl));
+      if (needLoad) {
         await loadVideoSrc(state.videoUrl);
+        if (gen !== applyGen) return;
       }
       const targetSec = expectedPos(state) / 1000;
-      if (
-        Number.isFinite(targetSec) &&
-        Math.abs((video.currentTime || 0) - targetSec) > 0.4
-      ) {
-        video.currentTime = targetSec;
-      }
+      await safeSeek(targetSec, gen);
+      if (gen !== applyGen) return;
       if (state.isPlaying) {
-        await video.play().catch(() => undefined);
+        await safePlay();
       } else {
-        video.pause();
+        try {
+          video.pause();
+        } catch {
+          /* WebKit */
+        }
+      }
+    } catch (e) {
+      console.warn("applyState media failed", e);
+      // Don't kill the room UI — show soft error
+      if (gen === applyGen) {
+        error = "Couldn't load the host stream (codec, network, or firewall)";
       }
     } finally {
-      queueMicrotask(() => {
-        applyingRemote = false;
-      });
+      if (gen === applyGen) {
+        queueMicrotask(() => {
+          applyingRemote = false;
+        });
+      }
     }
   } else if (drive && !state.videoUrl) {
     applyingRemote = true;
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
+    try {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    } catch {
+      /* */
+    }
     applyingRemote = false;
   }
-  paint();
+  if (gen === applyGen) paint();
 }
 
 function tokenFromUrl(url: string): string {
@@ -214,24 +240,97 @@ function tokenFromUrl(url: string): string {
   }
 }
 
-/** Hard-reset media element so switching files never sticks on the old stream. */
+/** Put video in the room shell if it exists (no-op on home). */
+function ensureVideoMounted() {
+  const mount = app.querySelector("#videoMount");
+  if (!mount) return;
+  mount.querySelector(".video-empty")?.remove();
+  if (video.parentElement !== mount) {
+    mount.appendChild(video);
+  }
+}
+
+/**
+ * Hard-reset media element. Always detach-safe: never leave WebKit mid-decode
+ * under a parent about to be wiped by paint().
+ */
 async function loadVideoSrc(url: string): Promise<void> {
-  video.pause();
+  try {
+    video.pause();
+  } catch {
+    /* */
+  }
+  // Clear previous resource fully before assigning a new host URL
   video.removeAttribute("src");
+  while (video.firstChild) video.removeChild(video.firstChild);
   video.load();
+
+  video.preload = "auto";
   video.src = url;
-  video.load();
+
   await new Promise<void>((resolve) => {
+    let settled = false;
     const done = () => {
+      if (settled) return;
+      settled = true;
       video.removeEventListener("loadedmetadata", done);
       video.removeEventListener("error", done);
+      video.removeEventListener("loadeddata", done);
       resolve();
     };
     video.addEventListener("loadedmetadata", done, { once: true });
+    video.addEventListener("loadeddata", done, { once: true });
     video.addEventListener("error", done, { once: true });
-    // safety
-    window.setTimeout(done, 4000);
+    window.setTimeout(done, 8000);
   });
+}
+
+/** Seek only when WebKit is ready — seeking too early crashes some Linux builds. */
+async function safeSeek(targetSec: number, gen: number): Promise<void> {
+  if (!Number.isFinite(targetSec) || targetSec < 0) return;
+  if (video.readyState < 1) return; // HAVE_NOTHING
+  if (Math.abs((video.currentTime || 0) - targetSec) <= 0.4) return;
+
+  // Prefer a time within seekable ranges when available
+  let t = targetSec;
+  try {
+    if (video.seekable && video.seekable.length > 0) {
+      const start = video.seekable.start(0);
+      const end = video.seekable.end(video.seekable.length - 1);
+      t = Math.min(Math.max(targetSec, start), end);
+    }
+  } catch {
+    /* seekable not ready */
+  }
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      video.removeEventListener("seeked", done);
+      video.removeEventListener("error", done);
+      resolve();
+    };
+    video.addEventListener("seeked", done, { once: true });
+    video.addEventListener("error", done, { once: true });
+    window.setTimeout(done, 2500);
+    try {
+      video.currentTime = t;
+    } catch {
+      done();
+    }
+  });
+  if (gen !== applyGen) return;
+}
+
+async function safePlay(): Promise<void> {
+  try {
+    const p = video.play();
+    if (p !== undefined) await p;
+  } catch {
+    // Autoplay / pipeline reject — not fatal
+  }
 }
 
 function wireVideoHostEvents() {
@@ -355,10 +454,13 @@ async function onSync(raw: unknown) {
       isHost = ev.is_host;
       members = ev.members;
       applyClock(ev.server_time_ms);
-      await applyState(ev.state, true);
+      // Switch shell first so <video> has a live mount before we load media.
+      // Join-while-playing used to load then paint() and WebKitGTK often died.
+      screen = "room";
       status = "";
       error = "";
       paint();
+      await applyState(ev.state, true);
       break;
     case "state":
       applyClock(ev.server_time_ms);
@@ -856,6 +958,13 @@ function paint() {
       ? `<span class="bar-meta">${escapeHtml(status)}</span>`
       : "";
 
+  // CRITICAL: detach <video> before thrashing innerHTML. WebKitGTK crashes when a
+  // playing/loading media element is destroyed as a descendant of replaced markup
+  // (common path: guest joins while host already has media).
+  if (video.parentNode) {
+    video.remove();
+  }
+
   app.innerHTML = `
     <div class="screen">
       ${updateBannerHtml()}
@@ -979,13 +1088,9 @@ function paint() {
 
   const mount = app.querySelector("#videoMount");
   if (mount && media) {
-    // remove empty overlay if present when mounting video
-    const empty = mount.querySelector(".video-empty");
-    empty?.remove();
-    mount.appendChild(video);
-  } else if (mount && !media) {
-    video.remove();
+    ensureVideoMounted();
   }
+  // if !media, video stays detached (already removed above)
 
   const log = app.querySelector("#chatLog");
   if (log) log.scrollTop = log.scrollHeight;

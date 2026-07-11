@@ -85,3 +85,9 @@ export VIDSYNC_FORCE_X11=1
 **AppImage:** `chmod +x`, needs FUSE (or extract: `./VidSync-linux.AppImage --appimage-extract-and-run`).
 
 **Deb deps:** `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1`.
+
+### Join while media playing
+
+WebKitGTK can crash if `app.innerHTML = …` destroys a loading/playing `<video>`.
+UI always **detaches** the video element before paint, mounts into `#videoMount`
+before load, seeks only after metadata, and serializes applyState generations.
