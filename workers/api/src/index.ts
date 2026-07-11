@@ -3,7 +3,13 @@ import {
   roomCodeSchema,
 } from "@vidsync/shared";
 import { generateRoomCode } from "./codes";
-import { corsHeaders, json } from "./cors";
+import {
+  handlePreflight,
+  isWebSocketOriginOk,
+  json,
+  parseAllowedOrigins,
+  withCors,
+} from "./cors";
 import { Room } from "./room/Room";
 import { verifyTurnstileToken } from "./turnstile";
 
@@ -12,31 +18,38 @@ export { Room };
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const origin = request.headers.get("Origin");
-    const allowed = env.WEB_ORIGIN || "https://vidsync.ratt.ing";
+    const allowedOrigins = parseAllowedOrigins(env.WEB_ORIGIN);
 
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders(origin, allowed),
-      });
+      return handlePreflight(request, allowedOrigins);
     }
 
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
     try {
-      if (request.method === "GET" && path === "/health") {
-        return json(
-          { ok: true, service: "vidsync-api" },
-          { origin, allowedOrigin: allowed },
-        );
+      if (
+        (request.method === "GET" || request.method === "HEAD") &&
+        path === "/health"
+      ) {
+        const body = { ok: true, service: "vidsync-api" };
+        if (request.method === "HEAD") {
+          return withCors(
+            new Response(null, { status: 200 }),
+            origin,
+            allowedOrigins,
+          );
+        }
+        return json(body, { origin, allowedOrigins });
       }
 
       if (request.method === "POST" && path === "/rooms") {
-        return await handleCreateRoom(request, env, origin, allowed);
+        return await handleCreateRoom(request, env, origin, allowedOrigins);
       }
 
-      const roomMatch = path.match(/^\/rooms\/([A-Z0-9]{8})(?:\/(ws|meta))?$/i);
+      const roomMatch = path.match(
+        /^\/rooms\/([A-Z0-9]{8})(?:\/(ws|meta))?$/i,
+      );
       if (roomMatch) {
         const codeRaw = roomMatch[1] ?? "";
         const code = codeRaw.toUpperCase();
@@ -44,26 +57,34 @@ export default {
         if (!parsed.success) {
           return json(
             { error: "invalid_code" },
-            { status: 400, origin, allowedOrigin: allowed },
+            { status: 400, origin, allowedOrigins },
           );
         }
 
         const sub = roomMatch[2];
         const stub = env.ROOMS.getByName(code);
+        const isWsUpgrade =
+          request.headers.get("Upgrade")?.toLowerCase() === "websocket";
 
-        if (sub === "ws" || (request.headers.get("Upgrade")?.toLowerCase() === "websocket" && !sub)) {
+        if (sub === "ws" || (isWsUpgrade && !sub)) {
           if (request.method !== "GET") {
             return json(
               { error: "method_not_allowed" },
-              { status: 405, origin, allowedOrigin: allowed },
+              { status: 405, origin, allowedOrigins },
             );
           }
-          const upgrade = request.headers.get("Upgrade");
-          if (!upgrade || upgrade.toLowerCase() !== "websocket") {
-            return new Response("Expected WebSocket upgrade", { status: 426 });
+          if (!isWsUpgrade) {
+            return withCors(
+              new Response("Expected WebSocket upgrade", { status: 426 }),
+              origin,
+              allowedOrigins,
+            );
+          }
+          if (!isWebSocketOriginOk(origin, allowedOrigins)) {
+            return new Response("Forbidden origin", { status: 403 });
           }
           return stub.fetch(
-            new Request(`https://room/ws`, {
+            new Request("https://room/ws", {
               method: "GET",
               headers: request.headers,
             }),
@@ -71,23 +92,32 @@ export default {
         }
 
         if (request.method === "GET" && (sub === "meta" || !sub)) {
-          const res = await stub.fetch(new Request("https://room/meta", { method: "GET" }));
+          const res = await stub.fetch(
+            new Request("https://room/meta", { method: "GET" }),
+          );
           const body = await res.text();
-          const headers = new Headers(corsHeaders(origin, allowed));
-          headers.set("Content-Type", "application/json; charset=utf-8");
-          return new Response(body, { status: res.status, headers });
+          return withCors(
+            new Response(body, {
+              status: res.status,
+              headers: {
+                "Content-Type": "application/json; charset=utf-8",
+              },
+            }),
+            origin,
+            allowedOrigins,
+          );
         }
       }
 
       return json(
         { error: "not_found" },
-        { status: 404, origin, allowedOrigin: allowed },
+        { status: 404, origin, allowedOrigins },
       );
     } catch (err) {
       console.error(err);
       return json(
         { error: "internal", message: "Internal error" },
-        { status: 500, origin, allowedOrigin: allowed },
+        { status: 500, origin, allowedOrigins },
       );
     }
   },
@@ -97,7 +127,7 @@ async function handleCreateRoom(
   request: Request,
   env: Env,
   origin: string | null,
-  allowed: string,
+  allowedOrigins: readonly string[],
 ): Promise<Response> {
   let raw: unknown = {};
   const text = await request.text();
@@ -107,7 +137,7 @@ async function handleCreateRoom(
     } catch {
       return json(
         { error: "invalid_json" },
-        { status: 400, origin, allowedOrigin: allowed },
+        { status: 400, origin, allowedOrigins },
       );
     }
   }
@@ -119,7 +149,7 @@ async function handleCreateRoom(
         error: "invalid_body",
         message: body.error.issues[0]?.message ?? "Invalid body",
       },
-      { status: 400, origin, allowedOrigin: allowed },
+      { status: 400, origin, allowedOrigins },
     );
   }
 
@@ -130,7 +160,7 @@ async function handleCreateRoom(
         error: "misconfigured",
         message: "Turnstile secret not configured",
       },
-      { status: 503, origin, allowedOrigin: allowed },
+      { status: 503, origin, allowedOrigins },
     );
   }
 
@@ -151,11 +181,10 @@ async function handleCreateRoom(
         message: "Captcha verification failed. Refresh and try again.",
         codes: captcha.codes,
       },
-      { status: 403, origin, allowedOrigin: allowed },
+      { status: 403, origin, allowedOrigins },
     );
   }
 
-  // Rare collision: retry a few times
   let code = generateRoomCode();
   for (let i = 0; i < 5; i++) {
     const stub = env.ROOMS.getByName(code);
@@ -174,7 +203,7 @@ async function handleCreateRoom(
       const wsUrl = wsUrlFor(request, meta.code);
       return json(
         { code: meta.code, wsUrl },
-        { status: 201, origin, allowedOrigin: allowed },
+        { status: 201, origin, allowedOrigins },
       );
     }
     code = generateRoomCode();
@@ -182,7 +211,7 @@ async function handleCreateRoom(
 
   return json(
     { error: "create_failed" },
-    { status: 500, origin, allowedOrigin: allowed },
+    { status: 500, origin, allowedOrigins },
   );
 }
 
