@@ -217,9 +217,9 @@ function attachProgressiveStream(
   video: HTMLVideoElement,
   url: string,
   onError: (message: string) => void,
+  destroyed: () => boolean,
   onStatus?: (message: string) => void,
   onSettled?: () => void,
-  destroyed: () => boolean,
 ): () => void {
   const bust = withUnblockCacheBust(url);
   onStatus?.(
@@ -397,9 +397,9 @@ export function attachVideoSource(
       video,
       url,
       onError,
+      isDestroyed,
       onStatus,
       settled,
-      isDestroyed,
     );
   } else {
     video.removeAttribute("crossorigin");
