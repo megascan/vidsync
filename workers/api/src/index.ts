@@ -153,36 +153,50 @@ async function handleCreateRoom(
     );
   }
 
-  const secret = env.TURNSTILE_SECRET_KEY;
-  if (!secret) {
-    return json(
-      {
-        error: "misconfigured",
-        message: "Turnstile secret not configured",
-      },
-      { status: 503, origin, allowedOrigins },
-    );
-  }
+  // Desktop app skips Turnstile (no widget). Web still requires captcha.
+  const desktop = isDesktopClient(request);
+  if (!desktop) {
+    const token = body.data.turnstileToken;
+    if (!token) {
+      return json(
+        {
+          error: "captcha_required",
+          message: "Captcha token required (web) or use the VidSync desktop app.",
+        },
+        { status: 400, origin, allowedOrigins },
+      );
+    }
+    const secret = env.TURNSTILE_SECRET_KEY;
+    if (!secret) {
+      return json(
+        {
+          error: "misconfigured",
+          message: "Turnstile secret not configured",
+        },
+        { status: 503, origin, allowedOrigins },
+      );
+    }
 
-  const remoteIp =
-    request.headers.get("CF-Connecting-IP") ??
-    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ??
-    null;
+    const remoteIp =
+      request.headers.get("CF-Connecting-IP") ??
+      request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ??
+      null;
 
-  const captcha = await verifyTurnstileToken({
-    secret,
-    token: body.data.turnstileToken,
-    remoteIp,
-  });
-  if (!captcha.ok) {
-    return json(
-      {
-        error: "captcha_failed",
-        message: "Captcha verification failed. Refresh and try again.",
-        codes: captcha.codes,
-      },
-      { status: 403, origin, allowedOrigins },
-    );
+    const captcha = await verifyTurnstileToken({
+      secret,
+      token,
+      remoteIp,
+    });
+    if (!captcha.ok) {
+      return json(
+        {
+          error: "captcha_failed",
+          message: "Captcha verification failed. Refresh and try again.",
+          codes: captcha.codes,
+        },
+        { status: 403, origin, allowedOrigins },
+      );
+    }
   }
 
   let code = generateRoomCode();
@@ -219,4 +233,10 @@ function wsUrlFor(request: Request, code: string): string {
   const url = new URL(request.url);
   const proto = url.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${url.host}/rooms/${code}/ws`;
+}
+
+/** Native desktop client: `X-VidSync-Client: desktop/0.1.0` */
+function isDesktopClient(request: Request): boolean {
+  const h = request.headers.get("X-VidSync-Client") ?? "";
+  return /^desktop\//i.test(h.trim());
 }

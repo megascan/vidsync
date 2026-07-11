@@ -1,13 +1,13 @@
 [package]
 name = "vidsync-host"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
-description = "Serve a local video file over HTTP with temporary UPnP port-forward + VidSync Unblock helper"
+description = "VidSync desktop — lobby, sync, local stream, mpv player"
 license = "MIT"
 publish = false
 
 [[bin]]
-name = "vidsync-host"
+name = "vidsync"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,15 +17,20 @@ axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
+futures-util = "0.3"
 igd-next = { version = "0.17", default-features = false, features = ["aio_tokio"] }
 local-ip-address = "0.6"
 mime_guess = "2"
 open = "5"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"

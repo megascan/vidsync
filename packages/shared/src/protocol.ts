@@ -195,8 +195,11 @@ export const createRoomBodySchema = z.object({
     (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
     videoUrlSchema.optional(),
   ),
-  /** Cloudflare Turnstile response token from the widget. */
-  turnstileToken: z.string().min(1).max(2048),
+  /**
+   * Cloudflare Turnstile response token from the web widget.
+   * Optional when the client is the desktop app (`X-VidSync-Client: desktop/…`).
+   */
+  turnstileToken: z.string().min(1).max(2048).optional(),
 });
 
 export type CreateRoomBody = z.infer<typeof createRoomBodySchema>;

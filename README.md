@@ -1,86 +1,47 @@
 # VidSync
 
-Anonymous watch parties for **raw HTTPS video stream URLs**. Host controls playback; everyone stays in sync.
+Anonymous watch parties. **Desktop app** creates a lobby, streams a local file, keeps everyone in sync. Multiplayer state lives on Cloudflare (Durable Object).
 
-**Live:** [https://vidsync.ratt.ing](https://vidsync.ratt.ing) · API: `https://api.vidsync.ratt.ing`
+**API:** `https://api.vidsync.ratt.ing`  
+**Legacy web:** [https://vidsync.ratt.ing](https://vidsync.ratt.ing)
 
-- **Web:** Astro static + React island  
-- **API:** Cloudflare Worker + Durable Object (WebSocket hibernation)  
-- **Formats:** progressive MP4/WebM, HLS (`.m3u8` via hls.js)
+## Desktop (primary)
+
+```bash
+cd apps/host
+cargo run --release
+```
+
+- Create / join room (no browser)
+- Host: stream a local video (HTTP + optional UPnP + public IP)
+- Playback in **mpv** (install [mpv](https://mpv.io) or drop `mpv.exe` next to the binary)
+- Host Play/Pause syncs the room
+
+See `apps/host/README.md` and `DOCS/desktop.md`.
 
 ## Monorepo
 
 ```
-apps/web          Astro UI
-apps/host         Rust CLI — local file HTTP + UPnP + extension helper
+apps/host         Rust desktop (vidsync) — lobby + stream + mpv
 workers/api       Worker + Room DO
 packages/shared   Protocol (zod)
-extensions/       VidSync Unblock (Chromium)
-DOCS/             Architecture notes
+apps/web          Legacy browser lobby
+extensions/       Legacy Unblock player (browser CORS)
+DOCS/
 ```
 
-## Optional: VidSync Unblock (extension)
-
-CORS-stubborn streams without a media proxy: load unpacked  
-`extensions/vidsync-unblock` (see its README). Room shows **Unblock on** when active.
-
-Or stage via host CLI: `cargo run --manifest-path apps/host/Cargo.toml -- install-ext`
-
-## Optional: stream a local file (`vidsync-host`)
-
-```bash
-cd apps/host
-cargo run --release -- serve ./movie.mp4
-# prints LAN (+ WAN if UPnP) URL → paste into room queue
-```
-
-See `apps/host/README.md` and `DOCS/host-app.md`.
-
-## Local dev
+## Local API
 
 ```bash
 bun install
 bun run dev:api    # http://localhost:8787
-bun run dev:web    # http://localhost:4321
+# desktop: set API field to http://127.0.0.1:8787
 ```
 
-Create a room on the home page, open the link in two browsers. Only the host can play/pause/seek/set URL.
-
-### Env
-
-| Var | Where | Prod | Local |
-|---|---|---|---|
-| `PUBLIC_API_URL` | web | `https://api.vidsync.ratt.ing` | `apps/web/.env` → `http://localhost:8787` |
-| `PUBLIC_TURNSTILE_SITE_KEY` | web | site key (public) | same |
-| `WEB_ORIGIN` | worker | `https://vidsync.ratt.ing` | `.dev.vars` → `http://localhost:4321` |
-| `TURNSTILE_SECRET_KEY` | worker secret / `.dev.vars` | required | required |
-
-Copy `workers/api/.dev.vars.example` → `.dev.vars` and set the Turnstile secret.  
-Copy `apps/web/.env.example` → `.env` for local API URL.  
-Production secret: `cd workers/api && bunx wrangler secret put TURNSTILE_SECRET_KEY`.
-
-Create room requires Cloudflare Turnstile. Join by code does not.
-
-## CORS reality
-
-Browsers fetch media **directly**. Sources need CORS (and Range for progressive). VidSync does not proxy video.
-
-## Deploy
-
-Domains (Cloudflare custom domains on zone `ratt.ing`):
-
-| Host | Service |
-|---|---|
-| `vidsync.ratt.ing` | static web (`apps/web`) |
-| `api.vidsync.ratt.ing` | API Worker + DO |
+## Deploy API
 
 ```bash
-# API
 cd workers/api && bunx wrangler deploy
-
-# Web
-cd apps/web && bun run deploy
 ```
 
-Turnstile dashboard: allow `vidsync.ratt.ing` (+ `localhost` for dev).  
-`/r/*` pretty rooms: SPA `not_found_handling` on web worker assets + `public/_redirects`.
+Desktop room create uses `X-VidSync-Client: desktop/…` (no Turnstile). Web create still needs captcha.

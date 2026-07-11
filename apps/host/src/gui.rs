@@ -1,26 +1,41 @@
-//! Minimal egui window: pick file, start/stop stream, copy URLs.
+//! VidSync desktop — home lobby + room (sync, stream, mpv).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, Vec2};
 use tokio::runtime::Runtime;
 
-use crate::ext;
+use crate::player::{self, MpvPlayer};
+use crate::protocol::{expected_position_ms, ClientMessage, Member, PlaybackState};
 use crate::session::{ServeOptions, ServeSession};
+use crate::sync::{self, SyncEvent, SyncHandle};
+
+const DEFAULT_API: &str = "https://api.vidsync.ratt.ing";
 
 enum WorkerCmd {
-    Start {
-        opts: ServeOptions,
+    Create {
+        api: String,
+        nick: String,
+        reply: Sender<Result<(String, SyncHandle), String>>,
+    },
+    Join {
+        api: String,
+        code: String,
+        nick: String,
+        reply: Sender<Result<SyncHandle, String>>,
+    },
+    StartFile {
+        path: PathBuf,
+        port: u16,
+        upnp: bool,
         reply: Sender<Result<Box<ServeSession>, String>>,
     },
-    Stop {
+    StopFile {
         session: Box<ServeSession>,
         reply: Sender<()>,
-    },
-    InstallExt {
-        reply: Sender<Result<String, String>>,
     },
 }
 
@@ -30,501 +45,863 @@ pub fn run() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 420.0])
-            .with_min_inner_size([400.0, 320.0])
-            .with_title("VidSync Host"),
+            .with_inner_size([720.0, 520.0])
+            .with_min_inner_size([560.0, 400.0])
+            .with_title("VidSync"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "VidSync Host",
+        "VidSync",
         options,
         Box::new(|cc| {
-            // Slightly denser UI
             cc.egui_ctx.set_pixels_per_point(1.1);
-            Ok(Box::new(HostApp::new(cmd_tx)))
+            Ok(Box::new(App::new(cmd_tx)))
         }),
     )
 }
 
 fn worker_loop(rx: Receiver<WorkerCmd>) {
-    let rt = Runtime::new().expect("tokio runtime");
+    let rt = Runtime::new().expect("tokio");
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            WorkerCmd::Start { opts, reply } => {
-                let res = rt
-                    .block_on(ServeSession::start(opts))
+            WorkerCmd::Create { api, nick, reply } => {
+                let r = rt
+                    .block_on(sync::create_and_join(&api, nick))
+                    .map_err(|e| format!("{e:#}"));
+                let _ = reply.send(r);
+            }
+            WorkerCmd::Join {
+                api,
+                code,
+                nick,
+                reply,
+            } => {
+                let r = rt
+                    .block_on(sync::join_room(&api, &code, nick))
+                    .map_err(|e| format!("{e:#}"));
+                let _ = reply.send(r);
+            }
+            WorkerCmd::StartFile {
+                path,
+                port,
+                upnp,
+                reply,
+            } => {
+                let r = rt
+                    .block_on(ServeSession::start(ServeOptions {
+                        file: path,
+                        port,
+                        bind: "0.0.0.0".into(),
+                        upnp,
+                        external_port: 0,
+                        lease_secs: 0,
+                        clipboard: true,
+                    }))
                     .map(Box::new)
                     .map_err(|e| format!("{e:#}"));
-                let _ = reply.send(res);
+                let _ = reply.send(r);
             }
-            WorkerCmd::Stop { session, reply } => {
+            WorkerCmd::StopFile { session, reply } => {
                 rt.block_on(session.stop());
                 let _ = reply.send(());
             }
-            WorkerCmd::InstallExt { reply } => {
-                let res = ext::install(None, true, false).map_err(|e| format!("{e:#}"));
-                let _ = reply.send(res);
-            }
         }
     }
 }
 
-struct HostApp {
+enum Screen {
+    Home,
+    Room,
+}
+
+struct App {
     cmd_tx: Sender<WorkerCmd>,
-    file: Option<PathBuf>,
-    port: String,
-    use_upnp: bool,
+    screen: Screen,
+    api_base: String,
+    nick: String,
+    join_code: String,
     busy: bool,
     status: String,
     error: Option<String>,
-    lan_url: Option<String>,
-    public_url: Option<String>,
-    upnp_mapped: bool,
-    public_ip: Option<String>,
-    /// Flash “Copied!” after a successful copy
-    copied_flash: Option<std::time::Instant>,
-    session: Option<Box<ServeSession>>,
-    pending: Option<Receiver<Result<Box<ServeSession>, String>>>,
-    pending_stop: Option<Receiver<()>>,
-    pending_ext: Option<Receiver<Result<String, String>>>,
+    // room
+    room_code: Option<String>,
+    is_host: bool,
+    session_id: Option<String>,
+    members: Vec<Member>,
+    playback: Option<PlaybackState>,
+    chat_lines: Vec<String>,
+    chat_draft: String,
+    sync: Option<SyncHandle>,
+    clock_offset_ms: i64,
+    // media
+    serve: Option<Box<ServeSession>>,
+    stream_url: Option<String>,
+    port: String,
+    use_upnp: bool,
+    pending_create: Option<Receiver<Result<(String, SyncHandle), String>>>,
+    pending_join: Option<Receiver<Result<SyncHandle, String>>>,
+    pending_file: Option<Receiver<Result<Box<ServeSession>, String>>>,
+    pending_stop_file: Option<Receiver<()>>,
+    // player
+    mpv: Option<MpvPlayer>,
+    mpv_ok: bool,
+    last_applied_version: i64,
+    last_hb: Instant,
+    copied_flash: Option<Instant>,
 }
 
-impl HostApp {
+impl App {
     fn new(cmd_tx: Sender<WorkerCmd>) -> Self {
         Self {
             cmd_tx,
-            file: None,
+            screen: Screen::Home,
+            api_base: DEFAULT_API.into(),
+            nick: std::env::var("USERNAME")
+                .or_else(|_| std::env::var("USER"))
+                .unwrap_or_else(|_| "viewer".into()),
+            join_code: String::new(),
+            busy: false,
+            status: "Create a room or join with a code.".into(),
+            error: None,
+            room_code: None,
+            is_host: false,
+            session_id: None,
+            members: Vec::new(),
+            playback: None,
+            chat_lines: Vec::new(),
+            chat_draft: String::new(),
+            sync: None,
+            clock_offset_ms: 0,
+            serve: None,
+            stream_url: None,
             port: "8765".into(),
             use_upnp: true,
-            busy: false,
-            status: "Pick a video file, then Start.".into(),
-            error: None,
-            lan_url: None,
-            public_url: None,
-            upnp_mapped: false,
-            public_ip: None,
+            pending_create: None,
+            pending_join: None,
+            pending_file: None,
+            pending_stop_file: None,
+            mpv: None,
+            mpv_ok: player::mpv_available(),
+            last_applied_version: -1,
+            last_hb: Instant::now() - Duration::from_secs(10),
             copied_flash: None,
-            session: None,
-            pending: None,
-            pending_stop: None,
-            pending_ext: None,
         }
     }
 
-    /// Prefer public IP URL, else LAN.
-    fn primary_url(&self) -> Option<&str> {
-        self.public_url
-            .as_deref()
-            .or(self.lan_url.as_deref())
+    fn now_server_ms(&self) -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let local = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        local + self.clock_offset_ms
     }
 
-    fn copy_url(&mut self, ctx: &egui::Context, url: &str) {
-        ctx.copy_text(url.to_string());
-        crate::session::try_clipboard(url);
-        self.copied_flash = Some(std::time::Instant::now());
-        self.status = format!("Copied: {url}");
+    fn ensure_mpv(&mut self) {
+        if self.mpv.is_some() {
+            return;
+        }
+        match MpvPlayer::start() {
+            Ok(p) => {
+                self.mpv = Some(p);
+                self.mpv_ok = true;
+                self.status = "mpv player ready.".into();
+            }
+            Err(e) => {
+                self.mpv_ok = false;
+                self.error = Some(format!("{e:#}"));
+            }
+        }
+    }
+
+    fn copy_text(&mut self, ctx: &egui::Context, text: &str) {
+        ctx.copy_text(text.to_string());
+        crate::session::try_clipboard(text);
+        self.copied_flash = Some(Instant::now());
+        self.status = format!("Copied: {text}");
+    }
+
+    fn leave_room(&mut self) {
+        if let Some(s) = self.sync.take() {
+            s.disconnect();
+        }
+        if let Some(serve) = self.serve.take() {
+            let (tx, rx) = mpsc::channel();
+            let _ = self.cmd_tx.send(WorkerCmd::StopFile {
+                session: serve,
+                reply: tx,
+            });
+            self.pending_stop_file = Some(rx);
+            self.busy = true;
+        }
+        self.mpv = None;
+        self.room_code = None;
+        self.session_id = None;
+        self.is_host = false;
+        self.members.clear();
+        self.playback = None;
+        self.chat_lines.clear();
+        self.stream_url = None;
+        self.last_applied_version = -1;
+        self.screen = Screen::Home;
+        self.status = "Left room.".into();
     }
 
     fn poll(&mut self) {
-        if let Some(rx) = &self.pending {
+        // async replies
+        if let Some(rx) = &self.pending_create {
+            match rx.try_recv() {
+                Ok(Ok((code, handle))) => {
+                    self.room_code = Some(code.clone());
+                    self.sync = Some(handle);
+                    self.screen = Screen::Room;
+                    self.busy = false;
+                    self.pending_create = None;
+                    self.status = format!("Room {code} — share code with friends.");
+                    self.error = None;
+                    self.ensure_mpv();
+                }
+                Ok(Err(e)) => {
+                    self.error = Some(e);
+                    self.busy = false;
+                    self.pending_create = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.busy = false;
+                    self.pending_create = None;
+                }
+            }
+        }
+        if let Some(rx) = &self.pending_join {
+            match rx.try_recv() {
+                Ok(Ok(handle)) => {
+                    self.sync = Some(handle);
+                    self.screen = Screen::Room;
+                    self.busy = false;
+                    self.pending_join = None;
+                    self.status = "Joined room.".into();
+                    self.error = None;
+                    self.ensure_mpv();
+                }
+                Ok(Err(e)) => {
+                    self.error = Some(e);
+                    self.busy = false;
+                    self.pending_join = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.busy = false;
+                    self.pending_join = None;
+                }
+            }
+        }
+        if let Some(rx) = &self.pending_file {
             match rx.try_recv() {
                 Ok(Ok(session)) => {
-                    self.lan_url = Some(session.info.lan_url.clone());
-                    self.public_url = session.info.public_url.clone();
-                    self.upnp_mapped = session.info.upnp_mapped;
-                    self.public_ip = session.info.public_ip.clone();
-                    let via = if session.info.upnp_mapped {
-                        "UPnP open"
-                    } else if session.info.public_url.is_some() {
-                        "public IP — open port on router if remote"
-                    } else {
-                        "LAN only"
-                    };
-                    self.status = format!(
-                        "Streaming {} on port {} ({via}) — public URL on clipboard",
-                        session.info.file_name, session.info.local_port
-                    );
-                    self.session = Some(session);
+                    let url = session
+                        .info
+                        .primary_url()
+                        .to_string();
+                    self.stream_url = Some(url.clone());
+                    self.serve = Some(session);
                     self.busy = false;
-                    self.pending = None;
-                    self.error = None;
-                    self.copied_flash = Some(std::time::Instant::now());
-                }
-                Ok(Err(e)) => {
-                    self.error = Some(e);
-                    self.status = "Failed to start.".into();
-                    self.busy = false;
-                    self.pending = None;
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    self.error = Some("worker died".into());
-                    self.busy = false;
-                    self.pending = None;
-                }
-            }
-        }
-        if let Some(rx) = &self.pending_stop {
-            match rx.try_recv() {
-                Ok(()) => {
-                    self.session = None;
-                    self.lan_url = None;
-                    self.public_url = None;
-                    self.upnp_mapped = false;
-                    self.public_ip = None;
-                    self.status = "Stopped. Pick a file and Start again.".into();
-                    self.busy = false;
-                    self.pending_stop = None;
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    self.busy = false;
-                    self.pending_stop = None;
-                }
-            }
-        }
-        if let Some(rx) = &self.pending_ext {
-            match rx.try_recv() {
-                Ok(Ok(msg)) => {
-                    self.status = msg.lines().next().unwrap_or("Extension staged.").into();
-                    self.busy = false;
-                    self.pending_ext = None;
-                    self.error = None;
+                    self.pending_file = None;
+                    self.status = format!("Streaming — queued {url}");
+                    if let Some(sync) = &self.sync {
+                        if self.is_host {
+                            sync.send(ClientMessage::QueueAdd {
+                                url: url.clone(),
+                                play_if_idle: true,
+                            });
+                        }
+                    }
+                    self.ensure_mpv();
+                    if let Some(mpv) = &self.mpv {
+                        let _ = mpv.load_url(&url);
+                    }
+                    self.copy_text_silent(&url);
                 }
                 Ok(Err(e)) => {
                     self.error = Some(e);
                     self.busy = false;
-                    self.pending_ext = None;
+                    self.pending_file = None;
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
                     self.busy = false;
-                    self.pending_ext = None;
+                    self.pending_file = None;
                 }
             }
         }
+        if let Some(rx) = &self.pending_stop_file {
+            if rx.try_recv().is_ok() {
+                self.pending_stop_file = None;
+                self.busy = false;
+            }
+        }
+
+        // sync events
+        let mut events = Vec::new();
+        if let Some(sync) = &mut self.sync {
+            while let Ok(ev) = sync.events.try_recv() {
+                events.push(ev);
+            }
+        }
+        for ev in events {
+            self.on_sync(ev);
+        }
+
+        // host heartbeat + follower drift
+        self.tick_playback();
     }
 
-    fn pick_file(&mut self) {
-        let picked = rfd::FileDialog::new()
-            .set_title("Choose video to stream")
-            .add_filter(
-                "Video",
-                &["mp4", "webm", "mkv", "mov", "m4v", "avi", "ts", "m3u8"],
-            )
-            .add_filter("All files", &["*"])
-            .pick_file();
-        if let Some(p) = picked {
-            self.file = Some(p);
-            self.error = None;
-            if self.session.is_none() {
-                self.status = "File selected. Hit Start stream.".into();
+    fn copy_text_silent(&mut self, text: &str) {
+        crate::session::try_clipboard(text);
+        self.copied_flash = Some(Instant::now());
+    }
+
+    fn on_sync(&mut self, ev: SyncEvent) {
+        match ev {
+            SyncEvent::Connected => {
+                self.status = "Connected.".into();
+            }
+            SyncEvent::Disconnected(r) => {
+                self.error = Some(format!("Disconnected: {r}"));
+                self.status = "Disconnected.".into();
+            }
+            SyncEvent::Welcome {
+                session_id,
+                is_host,
+                state,
+                members,
+                server_time_ms,
+            } => {
+                self.session_id = Some(session_id);
+                self.is_host = is_host;
+                self.members = members;
+                self.apply_clock(server_time_ms);
+                self.apply_playback_state(state, true);
+            }
+            SyncEvent::State {
+                state,
+                server_time_ms,
+            } => {
+                self.apply_clock(server_time_ms);
+                self.apply_playback_state(state, false);
+            }
+            SyncEvent::Members { members } => {
+                self.members = members;
+                if let Some(sid) = &self.session_id {
+                    self.is_host = self
+                        .members
+                        .iter()
+                        .any(|m| m.session_id == *sid && m.is_host);
+                }
+            }
+            SyncEvent::Chat(m) => {
+                self.chat_lines
+                    .push(format!("{}: {}", m.nickname, m.text));
+                if self.chat_lines.len() > 200 {
+                    self.chat_lines.drain(0..50);
+                }
+            }
+            SyncEvent::Error { code, message } => {
+                self.error = Some(format!("{code}: {message}"));
             }
         }
     }
 
-    fn start_stream(&mut self) {
-        if self.busy || self.session.is_some() {
+    fn apply_clock(&mut self, server_time_ms: i64) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let local = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.clock_offset_ms = server_time_ms - local;
+    }
+
+    fn apply_playback_state(&mut self, state: PlaybackState, force: bool) {
+        let version = state.version as i64;
+        let url_changed = self
+            .playback
+            .as_ref()
+            .map(|p| p.video_url != state.video_url)
+            .unwrap_or(true);
+
+        if !force && version == self.last_applied_version && !url_changed {
+            self.playback = Some(state);
             return;
         }
-        let Some(file) = self.file.clone() else {
-            self.error = Some("Pick a file first.".into());
+        self.last_applied_version = version;
+
+        // Followers always apply; host only on force (welcome) or URL change from queue
+        let should_drive_mpv = !self.is_host || force || url_changed;
+
+        if should_drive_mpv {
+            if let Some(url) = state.video_url.clone() {
+                self.ensure_mpv();
+                if let Some(mpv) = &self.mpv {
+                    let now = self.now_server_ms();
+                    let pos = expected_position_ms(&state, now);
+                    if url_changed || force {
+                        let _ = mpv.load_url(&url);
+                    }
+                    let _ = mpv.seek_seconds(pos / 1000.0);
+                    let _ = mpv.set_pause(!state.is_playing);
+                }
+            }
+        }
+
+        self.playback = Some(state);
+    }
+
+    fn tick_playback(&mut self) {
+        if self.sync.is_none() {
             return;
-        };
-        let port: u16 = match self.port.trim().parse() {
-            Ok(p) => p,
-            Err(_) => {
-                self.error = Some("Port must be 0–65535.".into());
+        }
+        if !self.is_host {
+            // soft drift for followers every ~2s
+            if self.last_hb.elapsed() < Duration::from_secs(2) {
                 return;
             }
-        };
+            self.last_hb = Instant::now();
+            if let (Some(state), Some(mpv)) = (self.playback.as_ref(), self.mpv.as_ref()) {
+                if mpv.applying_remote() {
+                    return;
+                }
+                if let Some(url) = &state.video_url {
+                    let now = self.now_server_ms();
+                    let target = expected_position_ms(state, now);
+                    if let Ok(cur) = mpv.time_pos_ms() {
+                        if (cur - target).abs() > 450.0 {
+                            let _ = mpv.seek_seconds(target / 1000.0);
+                        }
+                    }
+                    let _ = mpv.set_pause(!state.is_playing);
+                    let _ = url;
+                }
+            }
+            return;
+        }
 
-        let opts = ServeOptions {
-            file,
-            port,
-            bind: "0.0.0.0".into(),
-            upnp: self.use_upnp,
-            external_port: 0,
-            lease_secs: 0,
-            clipboard: true,
-        };
+        // host heartbeat
+        if self.last_hb.elapsed() < Duration::from_millis(crate::protocol::HOST_HEARTBEAT_MS) {
+            return;
+        }
+        self.last_hb = Instant::now();
+        let playing = self.playback.as_ref().map(|p| p.is_playing).unwrap_or(false);
+        if !playing {
+            return;
+        }
+        if let (Some(mpv), Some(sync)) = (self.mpv.as_ref(), self.sync.as_ref()) {
+            if let Ok(pos) = mpv.time_pos_ms() {
+                let paused = mpv.is_paused().unwrap_or(false);
+                sync.send(ClientMessage::Heartbeat {
+                    position_ms: pos,
+                    is_playing: !paused,
+                });
+            }
+        }
+    }
 
-        let (reply_tx, reply_rx) = mpsc::channel();
+    fn host_play(&mut self) {
+        if !self.is_host {
+            return;
+        }
+        let pos = self
+            .mpv
+            .as_ref()
+            .and_then(|m| m.time_pos_ms().ok())
+            .unwrap_or(0.0);
+        if let Some(mpv) = &self.mpv {
+            let _ = mpv.set_pause(false);
+        }
+        if let Some(sync) = &self.sync {
+            sync.send(ClientMessage::Play { position_ms: pos });
+        }
+    }
+
+    fn host_pause(&mut self) {
+        if !self.is_host {
+            return;
+        }
+        let pos = self
+            .mpv
+            .as_ref()
+            .and_then(|m| m.time_pos_ms().ok())
+            .unwrap_or(0.0);
+        if let Some(mpv) = &self.mpv {
+            let _ = mpv.set_pause(true);
+        }
+        if let Some(sync) = &self.sync {
+            sync.send(ClientMessage::Pause { position_ms: pos });
+        }
+    }
+
+    fn pick_and_stream(&mut self) {
+        if !self.is_host || self.busy {
+            return;
+        }
+        let path = rfd::FileDialog::new()
+            .set_title("Video to stream")
+            .add_filter("Video", &["mp4", "webm", "mkv", "mov", "m4v", "avi", "ts"])
+            .pick_file();
+        let Some(path) = path else { return };
+        let port: u16 = self.port.trim().parse().unwrap_or(8765);
+        let (tx, rx) = mpsc::channel();
         if self
             .cmd_tx
-            .send(WorkerCmd::Start {
-                opts,
-                reply: reply_tx,
+            .send(WorkerCmd::StartFile {
+                path,
+                port,
+                upnp: self.use_upnp,
+                reply: tx,
             })
             .is_err()
         {
-            self.error = Some("worker not running".into());
+            self.error = Some("worker dead".into());
             return;
         }
         self.busy = true;
-        self.status = if self.use_upnp {
-            "Starting server + UPnP + public IP…".into()
-        } else {
-            "Starting server + public IP…".into()
-        };
-        self.error = None;
-        self.pending = Some(reply_rx);
-    }
-
-    fn stop_stream(&mut self) {
-        if self.busy {
-            return;
-        }
-        let Some(session) = self.session.take() else {
-            return;
-        };
-        let (reply_tx, reply_rx) = mpsc::channel();
-        if self
-            .cmd_tx
-            .send(WorkerCmd::Stop {
-                session,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
-            self.error = Some("worker not running".into());
-            return;
-        }
-        self.busy = true;
-        self.status = "Stopping…".into();
-        self.pending_stop = Some(reply_rx);
-    }
-
-    fn install_ext(&mut self) {
-        if self.busy {
-            return;
-        }
-        let (reply_tx, reply_rx) = mpsc::channel();
-        if self
-            .cmd_tx
-            .send(WorkerCmd::InstallExt { reply: reply_tx })
-            .is_err()
-        {
-            self.error = Some("worker not running".into());
-            return;
-        }
-        self.busy = true;
-        self.status = "Installing / launching Unblock extension…".into();
-        self.pending_ext = Some(reply_rx);
+        self.status = "Starting file server…".into();
+        self.pending_file = Some(rx);
     }
 }
 
-impl eframe::App for HostApp {
+impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
-        if self.busy {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        if self.busy || self.sync.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.heading(RichText::new("VidSync Host").strong());
-            ui.label(
-                RichText::new("Serve a local file · optional UPnP · Unblock helper")
-                    .color(Color32::from_rgb(140, 145, 160))
-                    .small(),
-            );
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(8.0);
-
-            // File row
-            ui.label(RichText::new("File").strong());
-            ui.horizontal(|ui| {
-                let label = self
-                    .file
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "No file selected".into());
-                ui.add(
-                    egui::Label::new(RichText::new(label).monospace().small())
-                        .wrap()
-                        .sense(egui::Sense::click()),
-                );
-            });
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.busy && self.session.is_none(), egui::Button::new("Browse…"))
-                    .clicked()
-                {
-                    self.pick_file();
-                }
-                if self.session.is_some() {
-                    ui.label(
-                        RichText::new("Stop stream to change file")
-                            .small()
-                            .color(Color32::from_rgb(140, 145, 160)),
-                    );
-                }
-            });
-
-            ui.add_space(10.0);
-
-            // Options
-            ui.horizontal(|ui| {
-                ui.label("Port");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.port)
-                        .desired_width(72.0)
-                        .interactive(!self.busy && self.session.is_none()),
-                );
-                ui.checkbox(&mut self.use_upnp, "UPnP port-forward").on_hover_text(
-                    "Temporary router map so friends outside your LAN can reach the stream",
-                );
-            });
-
-            ui.add_space(12.0);
-
-            // Actions
-            ui.horizontal(|ui| {
-                let can_start = !self.busy && self.session.is_none() && self.file.is_some();
-                if ui
-                    .add_enabled(
-                        can_start,
-                        egui::Button::new(RichText::new("Start stream").strong())
-                            .min_size(Vec2::new(120.0, 28.0)),
-                    )
-                    .clicked()
-                {
-                    self.start_stream();
-                }
-                if ui
-                    .add_enabled(
-                        !self.busy && self.session.is_some(),
-                        egui::Button::new("Stop").min_size(Vec2::new(72.0, 28.0)),
-                    )
-                    .clicked()
-                {
-                    self.stop_stream();
-                }
-
-                let primary = self.primary_url().map(str::to_string);
-                let can_copy = primary.is_some() && !self.busy;
-                let copy_label = if self
-                    .copied_flash
-                    .is_some_and(|t| t.elapsed().as_secs_f32() < 1.5)
-                {
-                    "Copied!"
-                } else {
-                    "Copy URL"
-                };
-                if ui
-                    .add_enabled(
-                        can_copy,
-                        egui::Button::new(RichText::new(copy_label).strong())
-                            .fill(Color32::from_rgb(46, 160, 120))
-                            .min_size(Vec2::new(100.0, 28.0)),
-                    )
-                    .on_hover_text("Copy public IP URL (falls back to LAN)")
-                    .clicked()
-                {
-                    if let Some(url) = primary {
-                        self.copy_url(ctx, &url);
-                    }
-                }
-
-                if ui
-                    .add_enabled(
-                        !self.busy,
-                        egui::Button::new("Install Unblock").min_size(Vec2::new(120.0, 28.0)),
-                    )
-                    .clicked()
-                {
-                    self.install_ext();
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(8.0);
-
-            ui.label(RichText::new("Share URL").strong());
-            if let Some(ip) = &self.public_ip {
-                ui.label(
-                    RichText::new(format!("Public IP: {ip}"))
-                        .monospace()
-                        .small()
-                        .color(Color32::from_rgb(160, 170, 190)),
-                );
-            }
-            let public = self.public_url.clone();
-            let lan = self.lan_url.clone();
-            let upnp = self.upnp_mapped;
-            if let Some(url) = &public {
-                let label = if upnp {
-                    "Public (UPnP open)"
-                } else {
-                    "Public (forward port on router)"
-                };
-                if url_row(ui, label, url) {
-                    self.copy_url(ctx, url);
-                }
-            }
-            if let Some(url) = &lan {
-                if url_row(ui, "LAN (same Wi‑Fi)", url) {
-                    self.copy_url(ctx, url);
-                }
-            }
-            if public.is_none() && lan.is_none() {
-                ui.label(
-                    RichText::new("URLs appear here after Start.")
-                        .color(Color32::from_rgb(140, 145, 160))
-                        .small(),
-                );
-            }
-
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(&self.status)
-                    .color(Color32::from_rgb(110, 200, 160))
-                    .small(),
-            );
-            if let Some(err) = &self.error {
-                ui.colored_label(Color32::from_rgb(230, 100, 100), err);
-            }
-
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(
-                    "Copy URL → paste into VidSync room queue → Stream with Unblock.",
-                )
-                .color(Color32::from_rgb(140, 145, 160))
-                .small(),
-            );
+        egui::CentralPanel::default().show(ctx, |ui| match self.screen {
+            Screen::Home => self.ui_home(ui, ctx),
+            Screen::Room => self.ui_room(ui, ctx),
         });
     }
 }
 
-/// Returns true if user clicked Copy on this row.
-fn url_row(ui: &mut egui::Ui, label: &str, url: &str) -> bool {
-    let mut clicked = false;
-    ui.horizontal(|ui| {
+impl App {
+    fn ui_home(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        ui.add_space(8.0);
+        ui.heading(RichText::new("VidSync").strong().size(28.0));
         ui.label(
-            RichText::new(label)
-                .small()
+            RichText::new("Desktop watch party — no browser, no extension")
                 .color(Color32::from_rgb(140, 145, 160)),
         );
-        // Selectable so user can also Ctrl+C manually
-        let mut buf = url.to_string();
-        ui.add(
-            egui::TextEdit::singleline(&mut buf)
-                .desired_width(ui.available_width() - 70.0)
-                .font(egui::TextStyle::Monospace)
-                .interactive(true)
-                .frame(false),
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Nickname");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.nick)
+                    .desired_width(180.0)
+                    .interactive(!self.busy),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("API");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.api_base)
+                    .desired_width(320.0)
+                    .interactive(!self.busy),
+            );
+        });
+
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !self.busy && !self.nick.trim().is_empty(),
+                    egui::Button::new(RichText::new("Create room").strong())
+                        .min_size(Vec2::new(130.0, 32.0))
+                        .fill(Color32::from_rgb(46, 160, 120)),
+                )
+                .clicked()
+            {
+                let (tx, rx) = mpsc::channel();
+                let _ = self.cmd_tx.send(WorkerCmd::Create {
+                    api: self.api_base.clone(),
+                    nick: self.nick.trim().to_string(),
+                    reply: tx,
+                });
+                self.busy = true;
+                self.status = "Creating room…".into();
+                self.error = None;
+                self.pending_create = Some(rx);
+            }
+        });
+
+        ui.add_space(16.0);
+        ui.label(RichText::new("Or join").strong());
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.join_code)
+                    .desired_width(120.0)
+                    .hint_text("ROOMCODE")
+                    .interactive(!self.busy),
+            );
+            if ui
+                .add_enabled(
+                    !self.busy
+                        && !self.nick.trim().is_empty()
+                        && self.join_code.trim().len() >= 6,
+                    egui::Button::new("Join").min_size(Vec2::new(80.0, 28.0)),
+                )
+                .clicked()
+            {
+                let code = self.join_code.trim().to_uppercase();
+                self.room_code = Some(code.clone());
+                let (tx, rx) = mpsc::channel();
+                let _ = self.cmd_tx.send(WorkerCmd::Join {
+                    api: self.api_base.clone(),
+                    code,
+                    nick: self.nick.trim().to_string(),
+                    reply: tx,
+                });
+                self.busy = true;
+                self.status = "Joining…".into();
+                self.error = None;
+                self.pending_join = Some(rx);
+            }
+        });
+
+        ui.add_space(16.0);
+        ui.label(
+            RichText::new(if self.mpv_ok {
+                "mpv found — video will open in mpv window."
+            } else {
+                "mpv not on PATH — install mpv for playback (lobby still works)."
+            })
+            .small()
+            .color(Color32::from_rgb(140, 145, 160)),
         );
-        if ui
-            .add(egui::Button::new("Copy").min_size(Vec2::new(56.0, 22.0)))
-            .clicked()
-        {
-            clicked = true;
+
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(&self.status)
+                .color(Color32::from_rgb(110, 200, 160))
+                .small(),
+        );
+        if let Some(e) = &self.error {
+            ui.colored_label(Color32::from_rgb(230, 100, 100), e);
         }
-    });
-    clicked
+    }
+
+    fn ui_room(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let code = self.room_code.clone().unwrap_or_else(|| "????????".into());
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new(format!("Room {code}")).strong());
+            if self.is_host {
+                ui.label(
+                    RichText::new("HOST")
+                        .small()
+                        .color(Color32::from_rgb(46, 160, 120)),
+                );
+            } else {
+                ui.label(
+                    RichText::new("viewer")
+                        .small()
+                        .color(Color32::from_rgb(140, 145, 160)),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Leave").clicked() {
+                    self.leave_room();
+                }
+                let copy_label = if self
+                    .copied_flash
+                    .is_some_and(|t| t.elapsed().as_secs_f32() < 1.2)
+                {
+                    "Copied!"
+                } else {
+                    "Copy code"
+                };
+                if ui.button(copy_label).clicked() {
+                    self.copy_text(ctx, &code);
+                }
+            });
+        });
+        ui.separator();
+
+        egui::SidePanel::right("side")
+            .resizable(true)
+            .default_width(260.0)
+            .show_inside(ui, |ui| {
+                ui.label(RichText::new("In room").strong());
+                for m in &self.members {
+                    let tag = if m.is_host { " (host)" } else { "" };
+                    let you = self
+                        .session_id
+                        .as_ref()
+                        .map(|s| s == &m.session_id)
+                        .unwrap_or(false);
+                    ui.label(format!(
+                        "• {}{}{}",
+                        m.nickname,
+                        tag,
+                        if you { " ★" } else { "" }
+                    ));
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new("Queue").strong());
+                if let Some(pb) = &self.playback {
+                    if pb.queue.is_empty() {
+                        ui.label(
+                            RichText::new("Empty — host streams a file")
+                                .small()
+                                .color(Color32::from_rgb(140, 145, 160)),
+                        );
+                    }
+                    for (i, u) in pb.queue.iter().enumerate() {
+                        let active = pb.queue_index.map(|q| q as usize) == Some(i);
+                        let short = if u.len() > 40 {
+                            format!("{}…", &u[..40])
+                        } else {
+                            u.clone()
+                        };
+                        ui.label(
+                            RichText::new(format!("{} {}", if active { "▶" } else { "·" }, short))
+                                .small()
+                                .monospace(),
+                        );
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new("Chat").strong());
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.chat_lines {
+                            ui.label(RichText::new(line).small());
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.chat_draft)
+                            .desired_width(160.0)
+                            .hint_text("Message…"),
+                    );
+                    if (ui.button("Send").clicked()
+                        || (resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))))
+                        && !self.chat_draft.trim().is_empty()
+                    {
+                        if let Some(sync) = &self.sync {
+                            sync.send(ClientMessage::Chat {
+                                text: self.chat_draft.trim().to_string(),
+                            });
+                        }
+                        self.chat_draft.clear();
+                    }
+                });
+            });
+
+        ui.label(RichText::new("Playback").strong());
+        if let Some(pb) = &self.playback {
+            let url = pb.video_url.as_deref().unwrap_or("(no media)");
+            ui.label(RichText::new(url).small().monospace());
+            ui.label(
+                RichText::new(format!(
+                    "{} · {:.1}s · v{}",
+                    if pb.is_playing { "Playing" } else { "Paused" },
+                    pb.position_ms / 1000.0,
+                    pb.version
+                ))
+                .small()
+                .color(Color32::from_rgb(140, 145, 160)),
+            );
+        }
+
+        ui.add_space(8.0);
+        if self.is_host {
+            ui.horizontal(|ui| {
+                ui.label("Port");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.port)
+                        .desired_width(60.0)
+                        .interactive(self.serve.is_none() && !self.busy),
+                );
+                ui.checkbox(&mut self.use_upnp, "UPnP");
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.busy,
+                        egui::Button::new(RichText::new("Stream local file…").strong())
+                            .fill(Color32::from_rgb(46, 160, 120))
+                            .min_size(Vec2::new(150.0, 28.0)),
+                    )
+                    .clicked()
+                {
+                    self.pick_and_stream();
+                }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Play"))
+                    .clicked()
+                {
+                    self.host_play();
+                }
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Pause"))
+                    .clicked()
+                {
+                    self.host_pause();
+                }
+                if ui.button("Open mpv").clicked() {
+                    self.ensure_mpv();
+                }
+            });
+        } else {
+            ui.label(
+                RichText::new("Host controls playback. Video opens in mpv.")
+                    .small()
+                    .color(Color32::from_rgb(140, 145, 160)),
+            );
+            if ui.button("Open / focus mpv").clicked() {
+                self.ensure_mpv();
+                if let Some(pb) = &self.playback {
+                    if let Some(url) = &pb.video_url {
+                        if let Some(mpv) = &self.mpv {
+                            let pos = expected_position_ms(pb, self.now_server_ms());
+                            let _ = mpv.load_url(url);
+                            let _ = mpv.seek_seconds(pos / 1000.0);
+                            let _ = mpv.set_pause(!pb.is_playing);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(url) = self.stream_url.clone() {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Your stream URL").strong().small());
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut url.clone())
+                        .desired_width(ui.available_width() - 70.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                if ui.button("Copy URL").clicked() {
+                    self.copy_text(ctx, &url);
+                }
+            });
+        }
+
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(&self.status)
+                .color(Color32::from_rgb(110, 200, 160))
+                .small(),
+        );
+        if let Some(e) = &self.error {
+            ui.colored_label(Color32::from_rgb(230, 100, 100), e);
+        }
+    }
 }

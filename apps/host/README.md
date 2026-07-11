@@ -1,76 +1,45 @@
-# vidsync-host
+# VidSync desktop (`vidsync`)
 
-Serve a local video over HTTP (Range / seek-friendly), optional **UPnP** temp port-forward, and helper to stage the **VidSync Unblock** extension.
+Self-contained watch party app: **create/join lobby**, **stream a local file** (HTTP + UPnP + public IP), **sync via Cloudflare Room DO**, play in **mpv**.
 
-**GUI by default** (pick file → Start stream → copy URL). CLI still works for scripts.
+No browser room tab. No Unblock extension for the happy path.
 
-## Build
+## Build / run
 
 ```bash
 cd apps/host
-cargo build --release
-# binary: target/release/vidsync-host.exe
-```
-
-## GUI
-
-```bash
 cargo run --release
-# or
-cargo run --release -- gui
+# binary: target/release/vidsync.exe
 ```
 
-- **Browse…** — native file picker  
-- **Port** / **UPnP** toggle  
-- **Start stream** / **Stop**  
-- **Install Unblock** — stage extension + session load  
-- Share URLs with **Copy**
+Needs network to `https://api.vidsync.ratt.ing` (or local API).  
+**mpv** on PATH (or `mpv.exe` next to the binary) for video.
 
-## Serve a file (CLI)
+## GUI flow
+
+1. Nickname → **Create room** (or Join with 8-char code)  
+2. Host: **Stream local file…** → HTTP server + queue URL for room  
+3. Everyone: video in **mpv**; host Play/Pause drives the room  
+4. **Copy code** / **Copy URL** for friends  
+
+## CLI (legacy / scripting)
 
 ```bash
-# LAN + UPnP (default). URL copied to clipboard.
-cargo run -- serve "D:\videos\movie.mp4"
-
-# LAN only
-cargo run -- serve ./clip.mp4 --no-upnp
-
-# Custom port / external port / also open extension helper
-cargo run -- serve ./clip.mp4 -p 9000 --external-port 9000 --install-ext
+cargo run --release -- serve ./movie.mp4
+cargo run --release -- install-ext   # old web extension helper
 ```
 
-Prints:
+## API
 
-- **LAN URL** — same Wi‑Fi / network  
-- **WAN URL** — if UPnP IGD works on the router  
+Desktop create uses header `X-VidSync-Client: desktop/0.2.0` (no Turnstile).  
+Web create still requires captcha.
 
-Paste URL into the VidSync room queue, then **Stream with Unblock**.
+## Layout
 
-Stop with **Ctrl+C** — removes the UPnP mapping.
-
-Stream path is secret: `http://IP:PORT/s/<token>` (not a directory listing of your disk).
-
-## Install Unblock extension
-
-Browsers block silent MV3 installs. This **stages** the unpacked extension and can launch Chrome/Edge with `--load-extension` for the session:
-
-```bash
-cargo run -- install-ext
-cargo run -- install-ext --edge
-cargo run -- install-ext --no-launch
-cargo run -- install-ext --from ../../extensions/vidsync-unblock --no-launch
-```
-
-Staged to:
-
-- Windows: `%LOCALAPPDATA%\VidSync\extension\vidsync-unblock`
-- Linux: `~/.local/share/VidSync/extension/vidsync-unblock`
-
-Permanent: Developer mode → Load unpacked → that folder.
-
-## Notes
-
-- Needs **Range** support on the client (browsers + Unblock player do).  
-- UPnP must be enabled on the router; CGNAT / no IGD → WAN URL fails, LAN still works.  
-- Exposes one file for as long as the process runs — treat the token URL as semi-secret.  
-- Firewall may prompt for inbound TCP on first run.
+| Module | Role |
+|---|---|
+| `gui.rs` | Home + room UI |
+| `sync.rs` | WebSocket → Room DO |
+| `api.rs` | REST create room |
+| `player.rs` | mpv JSON IPC |
+| `server.rs` / `session.rs` / `upnp.rs` | File stream + port map |
