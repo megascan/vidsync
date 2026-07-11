@@ -12,8 +12,10 @@ Anonymous watch parties for **raw HTTPS video stream URLs**. Host controls playb
 
 ```
 apps/web          Astro UI
+apps/host         Rust CLI — local file HTTP + UPnP + extension helper
 workers/api       Worker + Room DO
 packages/shared   Protocol (zod)
+extensions/       VidSync Unblock (Chromium)
 DOCS/             Architecture notes
 ```
 
@@ -21,6 +23,18 @@ DOCS/             Architecture notes
 
 CORS-stubborn streams without a media proxy: load unpacked  
 `extensions/vidsync-unblock` (see its README). Room shows **Unblock on** when active.
+
+Or stage via host CLI: `cargo run --manifest-path apps/host/Cargo.toml -- install-ext`
+
+## Optional: stream a local file (`vidsync-host`)
+
+```bash
+cd apps/host
+cargo run --release -- serve ./movie.mp4
+# prints LAN (+ WAN if UPnP) URL → paste into room queue
+```
+
+See `apps/host/README.md` and `DOCS/host-app.md`.
 
 ## Local dev
 

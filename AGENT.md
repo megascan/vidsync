@@ -6,6 +6,7 @@ Anonymous watch-party: rooms sync raw video stream URLs.
 - `apps/web` — Astro 7 static, React islands, Tailwind v4, Zustand
 - `workers/api` — CF Worker + Durable Object (`Room`) WebSocket hibernation
 - `packages/shared` — protocol zod schemas + types (single source of truth)
+- `apps/host` — Rust CLI (`vidsync-host`): HTTP Range file serve + UPnP + Unblock install helper
 
 ## Rules
 - bun workspaces. TypeScript strict. No `any`.
@@ -30,3 +31,7 @@ Pretty `/r/:code` via `apps/web/src/asset-worker.ts` (see DOCS/architecture.md).
 ## Extension
 `extensions/vidsync-unblock` — MV3, load unpacked. Bridge: `apps/web/src/lib/unblock/`.
 Room tab = lobby (queue/chat/WS). Host play/pause/seek live in extension player → DO.
+
+## Host CLI
+`apps/host` — `cargo run -p vidsync-host -- serve ./file.mp4` (UPnP default). `install-ext` stages Unblock.
+See `DOCS/host-app.md`.
