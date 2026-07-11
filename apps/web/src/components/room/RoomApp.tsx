@@ -283,7 +283,7 @@ export default function RoomApp() {
     if (!isHost) return;
     if (!isAllowedVideoUrl(url)) {
       setLastError(
-        "Video URL must be public https (no localhost/private hosts).",
+        "Video URL must be http(s) — e.g. https://cdn…/file.mp4 or http://192.168.x.x/…",
       );
       return;
     }
@@ -639,7 +639,8 @@ export default function RoomApp() {
                   Add to queue
                 </button>
                 <p className="text-[10px] leading-snug text-[var(--color-muted)]">
-                  Public HTTPS only — no localhost or private hosts.
+                  http(s) streams OK — including localhost / LAN. Browser must
+                  be able to fetch the URL (CORS / mixed content still apply).
                 </p>
               </div>
             ) : null}

@@ -12,7 +12,7 @@
 ## Queue (host only)
 - `queue_add` / `queue_remove` / `queue_play` / `queue_clear`
 - `set_url` = add + play now (compat)
-- URLs: **public HTTPS only** (no localhost / private hosts)
+- URLs: **http(s)** — public CDN, localhost, and private LAN allowed
 - First add while idle auto-selects that item
 
 ## Limits

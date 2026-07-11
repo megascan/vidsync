@@ -33,9 +33,10 @@ export const nicknameSchema = z
   .max(MAX_NICKNAME_LENGTH)
   .transform((s) => s.replace(/[\u0000-\u001f\u007f]/g, ""));
 
-const privateHostPattern =
-  /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.|0\.0\.0\.0|\[::1\]|metadata\.google|169\.254\.)/i;
-
+/**
+ * Stream URLs: http(s) only. Localhost / LAN / private hosts allowed
+ * (home NAS, local media servers). Blocks non-http schemes.
+ */
 export function isAllowedVideoUrl(raw: string): boolean {
   if (raw.length === 0 || raw.length > MAX_VIDEO_URL_LENGTH) return false;
   let url: URL;
@@ -44,8 +45,8 @@ export function isAllowedVideoUrl(raw: string): boolean {
   } catch {
     return false;
   }
-  if (url.protocol !== "https:") return false;
-  if (privateHostPattern.test(url.hostname)) return false;
+  if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+  if (!url.hostname) return false;
   return true;
 }
 
@@ -53,7 +54,7 @@ export const videoUrlSchema = z
   .string()
   .max(MAX_VIDEO_URL_LENGTH)
   .refine(isAllowedVideoUrl, {
-    message: "Video URL must be public https (no localhost/private hosts).",
+    message: "Video URL must be http(s) (e.g. https://… or http://localhost/…).",
   });
 
 export const playbackStateSchema = z.object({
@@ -64,7 +65,7 @@ export const playbackStateSchema = z.object({
   serverAnchorMs: z.number().int().nonnegative(),
   hostSessionId: z.string().nullable(),
   updatedAtMs: z.number().int().nonnegative(),
-  /** Ordered playlist of public https stream URLs. */
+  /** Ordered playlist of http(s) stream URLs (public or LAN). */
   queue: z.array(z.string()).default([]),
   /** Index into queue for current item, or null if nothing selected. */
   queueIndex: z.number().int().nonnegative().nullable().default(null),

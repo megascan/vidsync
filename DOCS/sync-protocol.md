@@ -5,7 +5,7 @@ Wire: JSON text over WebSocket. Schemas: `packages/shared`.
 ## PlaybackState
 - `version` monotonic
 - `videoUrl` https or null (current item)
-- `queue` string[] of public https URLs
+- `queue` string[] of http(s) URLs (public or LAN)
 - `queueIndex` number | null
 - `isPlaying`
 - `positionMs` at `serverAnchorMs`

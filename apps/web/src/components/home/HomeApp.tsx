@@ -107,8 +107,8 @@ export default function HomeApp() {
       <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h2 className="text-sm font-medium">Create room</h2>
         <p className="mt-1 text-xs leading-relaxed text-[var(--color-muted)]">
-          Opens an empty sync group. Host queues public HTTPS streams after
-          join.
+          Opens an empty sync group. Host queues http(s) streams after join
+          (public CDN or LAN).
         </p>
 
         <Turnstile onToken={onToken} resetKey={captchaReset} />
