@@ -115,8 +115,8 @@ video.playsInline = true;
 video.controls = true;
 video.preload = "auto";
 video.setAttribute("controlsList", "nodownload");
-// Helps WebKit avoid some opaque cross-origin range edge cases
-video.crossOrigin = "anonymous";
+// Do NOT set crossOrigin — WebKitGTK + ranged HTTP streams often fail silently
+// with CORS mode "anonymous" even when ACAO:* is present.
 
 function nowServer(): number {
   return Date.now() + clockOffsetMs;
@@ -211,7 +211,10 @@ async function applyState(state: PlaybackState, force: boolean) {
       console.warn("applyState media failed", e);
       // Don't kill the room UI — show soft error
       if (gen === applyGen) {
-        error = "Couldn't load the host stream (codec, network, or firewall)";
+        error =
+          e instanceof Error
+            ? e.message
+            : "Couldn't load the host stream (codec, network, or firewall)";
       }
     } finally {
       if (gen === applyGen) {
@@ -258,6 +261,24 @@ function ensureVideoMounted() {
  * Hard-reset media element. Always detach-safe: never leave WebKit mid-decode
  * under a parent about to be wiped by paint().
  */
+function mediaErrorMessage(): string {
+  const err = video.error;
+  if (!err) return "Couldn't load the host stream";
+  // MEDIA_ERR_* codes
+  switch (err.code) {
+    case 1:
+      return "Playback aborted";
+    case 2:
+      return "Network error loading stream (firewall / host offline / bad URL)";
+    case 3:
+      return "Decode error — Linux WebKit may not like this file (try remux: ffmpeg -i in.mp4 -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart out.mp4)";
+    case 4:
+      return "Format not supported by this system's media stack (need H.264+AAC in .mp4 for Linux)";
+    default:
+      return `Media error ${err.code}${err.message ? `: ${err.message}` : ""}`;
+  }
+}
+
 async function loadVideoSrc(url: string): Promise<void> {
   try {
     video.pause();
@@ -270,22 +291,59 @@ async function loadVideoSrc(url: string): Promise<void> {
   video.load();
 
   video.preload = "auto";
-  video.src = url;
+  // Prefer <source type="…"> so WebKit can pick a pipeline without sniffing only
+  const source = document.createElement("source");
+  source.src = url;
+  const ext = (() => {
+    try {
+      const p = new URL(url).pathname.toLowerCase();
+      if (p.endsWith(".webm")) return "video/webm";
+      if (p.endsWith(".mkv")) return "video/x-matroska";
+      if (p.endsWith(".mp4") || p.endsWith(".m4v") || p.endsWith(".mov"))
+        return "video/mp4";
+    } catch {
+      /* */
+    }
+    return "video/mp4";
+  })();
+  source.type = ext;
+  video.appendChild(source);
+  video.load();
 
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     let settled = false;
-    const done = () => {
+    const ok = () => {
       if (settled) return;
       settled = true;
-      video.removeEventListener("loadedmetadata", done);
-      video.removeEventListener("error", done);
-      video.removeEventListener("loadeddata", done);
+      video.removeEventListener("loadedmetadata", ok);
+      video.removeEventListener("loadeddata", ok);
+      video.removeEventListener("error", bad);
       resolve();
     };
-    video.addEventListener("loadedmetadata", done, { once: true });
-    video.addEventListener("loadeddata", done, { once: true });
-    video.addEventListener("error", done, { once: true });
-    window.setTimeout(done, 8000);
+    const bad = () => {
+      if (settled) return;
+      settled = true;
+      video.removeEventListener("loadedmetadata", ok);
+      video.removeEventListener("loadeddata", ok);
+      video.removeEventListener("error", bad);
+      reject(new Error(mediaErrorMessage()));
+    };
+    video.addEventListener("loadedmetadata", ok, { once: true });
+    video.addEventListener("loadeddata", ok, { once: true });
+    video.addEventListener("error", bad, { once: true });
+    // source element errors bubble to video
+    source.addEventListener("error", bad, { once: true });
+    window.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        // Timeout without metadata — still resolve so UI can show soft error via play fail
+        if (video.readyState < 1) {
+          reject(new Error("Timed out loading stream (host unreachable or blocked)"));
+        } else {
+          resolve();
+        }
+      }
+    }, 12000);
   });
 }
 

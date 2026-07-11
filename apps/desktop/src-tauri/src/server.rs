@@ -38,10 +38,47 @@ pub fn random_token() -> String {
 }
 
 pub fn guess_mime(path: &Path) -> String {
+    // Prefer extension map — WebKitGTK/GStreamer is picky; never serve video as octet-stream.
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        match ext.to_ascii_lowercase().as_str() {
+            "mp4" | "m4v" | "mov" => return "video/mp4".into(),
+            "webm" => return "video/webm".into(),
+            "mkv" => return "video/x-matroska".into(),
+            "ts" | "m2ts" => return "video/mp2t".into(),
+            "avi" => return "video/x-msvideo".into(),
+            "mp3" => return "audio/mpeg".into(),
+            "m4a" => return "audio/mp4".into(),
+            "ogg" | "oga" => return "audio/ogg".into(),
+            "wav" => return "audio/wav".into(),
+            _ => {}
+        }
+    }
     mime_guess::from_path(path)
         .first_raw()
         .unwrap_or("application/octet-stream")
         .to_string()
+}
+
+/// Safe URL path segment from original file name (keeps extension for demuxer sniffing).
+pub fn url_file_name(file_name: &str) -> String {
+    let base = file_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("video.mp4");
+    let mut out = String::with_capacity(base.len());
+    for c in base.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+            out.push(if c == ' ' { '_' } else { c });
+        }
+    }
+    if out.is_empty() {
+        return "video.mp4".into();
+    }
+    // Ensure an extension so GStreamer/WebKit can pick a demuxer from the path
+    if !out.contains('.') {
+        out.push_str(".mp4");
+    }
+    out
 }
 
 pub fn router(registry: FileRegistry) -> Router {
@@ -127,28 +164,20 @@ async fn stream_inner(reg: FileRegistry, token: String, headers: HeaderMap) -> R
                 let stream = ReaderStream::new(limited);
                 let body = Body::from_stream(stream);
 
-                Response::builder()
-                    .status(StatusCode::PARTIAL_CONTENT)
-                    .header(header::CONTENT_TYPE, entry.mime.as_str())
-                    .header(header::ACCEPT_RANGES, "bytes")
-                    .header(header::CONTENT_LENGTH, content_len)
-                    .header(
-                        header::CONTENT_RANGE,
-                        format!("bytes {start}-{end}/{len}"),
-                    )
-                    .header(
-                        header::CONTENT_DISPOSITION,
-                        format!("inline; filename=\"{}\"", entry.file_name),
-                    )
-                    .body(body)
-                    .unwrap_or_else(|e| {
-                        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-                    })
+                media_response(
+                    StatusCode::PARTIAL_CONTENT,
+                    &entry,
+                    body,
+                    content_len,
+                    Some((start, end, len)),
+                )
             }
             Ok(None) => full_response(file, len, &entry).await,
             Err(msg) => Response::builder()
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                 .header(header::CONTENT_RANGE, format!("bytes */{len}"))
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::ACCEPT_RANGES, "bytes")
                 .body(Body::from(msg))
                 .unwrap_or_else(|e| {
                     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
@@ -162,16 +191,40 @@ async fn stream_inner(reg: FileRegistry, token: String, headers: HeaderMap) -> R
 async fn full_response(file: File, len: u64, entry: &FileEntry) -> Response {
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
-    Response::builder()
-        .status(StatusCode::OK)
+    media_response(StatusCode::OK, entry, body, len, None)
+}
+
+fn media_response(
+    status: StatusCode,
+    entry: &FileEntry,
+    body: Body,
+    content_len: u64,
+    range: Option<(u64, u64, u64)>,
+) -> Response {
+    let safe = url_file_name(&entry.file_name);
+    let mut b = Response::builder()
+        .status(status)
         .header(header::CONTENT_TYPE, entry.mime.as_str())
         .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_LENGTH, len)
+        .header(header::CONTENT_LENGTH, content_len)
         .header(
             header::CONTENT_DISPOSITION,
-            format!("inline; filename=\"{}\"", entry.file_name),
+            format!("inline; filename=\"{safe}\""),
         )
-        .body(body)
+        // Explicit CORS (belt + CorsLayer) — WebKit range + crossOrigin is picky
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "Accept-Ranges, Content-Range, Content-Length, Content-Type")
+        // Hint caches / intermediaries not to rewrite bodies
+        .header(header::CACHE_CONTROL, "no-store");
+
+    if let Some((start, end, total)) = range {
+        b = b.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}"),
+        );
+    }
+
+    b.body(body)
         .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
 }
 

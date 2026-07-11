@@ -146,11 +146,15 @@ impl MediaHub {
             },
         );
 
-        let lan_url = format!("{}/s/{token}", self.lan_base);
+        // Include original file name + extension in the path. WebKitGTK/GStreamer
+        // often fails to pick a demuxer for extension-less URLs like /s/{token}
+        // even when Content-Type is correct (Windows WebView2 is more forgiving).
+        let path_name = server::url_file_name(&file_name);
+        let lan_url = format!("{}/s/{token}/{path_name}", self.lan_base);
         let public_url = self
             .public_base
             .as_ref()
-            .map(|b| format!("{b}/s/{token}"));
+            .map(|b| format!("{b}/s/{token}/{path_name}"));
 
         info!("added file {file_name} → {lan_url}");
 

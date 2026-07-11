@@ -91,3 +91,20 @@ export VIDSYNC_FORCE_X11=1
 WebKitGTK can crash if `app.innerHTML = …` destroys a loading/playing `<video>`.
 UI always **detaches** the video element before paint, mounts into `#videoMount`
 before load, seeks only after metadata, and serializes applyState generations.
+
+### Linux “won't play” video
+
+System WebView = **WebKitGTK + GStreamer**, not full FFmpeg. Prefer:
+
+- Container: **MP4**
+- Video: **H.264 (yuv420p)**
+- Audio: **AAC**
+
+Stream URLs include the file name + extension (`/s/{token}/name.mp4`) so GStreamer
+can pick a demuxer. Extension-less URLs often fail on Linux while Windows works.
+
+Extra tracks (e.g. QuickTime **tmcd** timecode) can confuse demuxers. Remux clean:
+
+```bash
+ffmpeg -i in.mp4 -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart out.mp4
+```
