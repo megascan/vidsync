@@ -8,15 +8,15 @@ VidSync only syncs **URLs** — it does not upload media. Hosts with a file on d
 
 1. HTTP server with **Range** (seek)
 2. Optional **UPnP** so remote friends can reach it without manual router config
-3. Optional **Unblock extension** install helper (Chromium CORS / multi‑GB)
+
+**Note:** Prefer `apps/desktop` (Tauri). This crate is legacy. Browser Unblock extension was removed.
 
 ## Commands
 
 | Command | Role |
 |---|---|
-| `vidsync-host` / `gui` | egui window: file picker, start/stop, copy URLs, install Unblock |
+| `vidsync-host` / `gui` | egui window: file picker, start/stop, copy URLs |
 | `vidsync-host serve <file>` | Headless: bind HTTP, print LAN (+ WAN if UPnP), Ctrl+C cleans map |
-| `vidsync-host install-ext` | Stage `vidsync-unblock` + optional `--load-extension` launch |
 
 ## GUI stack
 

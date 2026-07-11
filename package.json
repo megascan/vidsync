@@ -1,15 +1,14 @@
 {
   "name": "vidsync",
   "private": true,
-  "workspaces": ["apps/*", "workers/*", "packages/*", "extensions/*"],
+  "workspaces": ["apps/*", "workers/*", "packages/*"],
   "scripts": {
-    "dev:web": "bun run --filter @vidsync/web dev",
     "dev:api": "bun run --filter @vidsync/api dev",
     "dev:desktop": "bun run --filter @vidsync/desktop tauri:dev",
     "deploy:site": "bun run --filter @vidsync/site deploy",
-    "build": "bun run --filter @vidsync/shared build && bun run --filter @vidsync/web build && bun run --filter @vidsync/api build",
+    "build": "bun run --filter @vidsync/shared build && bun run --filter @vidsync/api build",
     "build:desktop": "bun run --filter @vidsync/desktop tauri:build",
-    "check": "bun run --filter @vidsync/shared check && bun run --filter @vidsync/web check && bun run --filter @vidsync/api check"
+    "check": "bun run --filter @vidsync/shared check && bun run --filter @vidsync/api check"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

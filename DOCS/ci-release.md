@@ -46,10 +46,23 @@ Dashboard → Worker → Settings → Builds:
 
 | Field | Value |
 |---|---|
-| **Root directory** | `apps/site` |
-| **Build command** | leave empty, or `npm install` / `bun install` |
+| **Root directory** | `apps/site` (required — monorepo root breaks npm) |
+| **Build command** | leave **empty** (or `bun install` only if you need deps) |
 | **Deploy command** | `npx wrangler deploy` |
 | **Version command** (preview) | `npx wrangler versions upload` |
+
+**Do not** set build command to `npm install` at monorepo root. Root
+`package.json` uses bun/npm workspaces (`workspace:*`); npm dies with
+`EUNSUPPORTEDPROTOCOL workspace:*`. `apps/site` is standalone (only
+wrangler) — CF must build from that folder, not repo root.
+
+If root is wrong you see: bun install OK → then `npm install` → fail on
+`workspace:*`.
+
+Lockfiles are **gitignored** (`bun.lock`, `package-lock.json`, etc.).
+CF must **not** rely on `bun install --frozen-lockfile` against a committed
+lock — with root `apps/site` and no lockfile, auto-install resolves
+fresh. If CF still freezes at monorepo root, root directory is still wrong.
 
 Manual:
 

@@ -28,9 +28,7 @@ apps/desktop      Tauri 2 client
 apps/site         Landing + R2 download worker → vidsync.ratt.ing
 workers/api       Room DO
 packages/shared   Protocol
-apps/web          Legacy browser lobby
 apps/host         Legacy egui / CLI
-extensions/       Legacy Unblock
 DOCS/
 ```
 
@@ -48,4 +46,4 @@ bun run dev:api    # http://localhost:8787
 cd workers/api && bunx wrangler deploy
 ```
 
-Desktop room create uses `X-VidSync-Client: desktop/…` (no Turnstile). Web create still needs captcha.
+Desktop room create uses `X-VidSync-Client: desktop/…` (no Turnstile).

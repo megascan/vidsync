@@ -1,13 +1,13 @@
 # VidSync — agent rules
 
-Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsync`).
+Anonymous watch-party. **Primary client: Tauri desktop** (`apps/desktop` → `vidsync`).
 
 ## Stack
 - `apps/desktop` — **primary** Tauri 2 client (lobby + player + stream)
 - `apps/site` — landing + R2 downloads Worker → `vidsync.ratt.ing`
 - `workers/api` — CF Worker + Durable Object (`Room`) WebSocket hibernation
 - `packages/shared` — protocol zod schemas (TS)
-- `apps/web` / `apps/host` / `extensions` — legacy
+- `apps/host` — legacy egui/CLI (superseded by desktop)
 
 ## Rules
 - bun workspaces for TS. TypeScript strict. No `any`.
@@ -21,7 +21,7 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 - `bun run dev:desktop` — Tauri desktop
 - `cd apps/desktop && bun run tauri:build` — local installers
 - `cd apps/site && bunx wrangler deploy` — landing (needs CF auth)
-- CF Git Builds root: **`apps/site`** (not `apps/web`)
+- CF Git Builds root: **`apps/site`**
 - `bun run dev:api` — wrangler DO local
 - Prod: site `vidsync.ratt.ing`, API `api.vidsync.ratt.ing`
 - CI: `.github/workflows/desktop-release.yml` → R2 + site

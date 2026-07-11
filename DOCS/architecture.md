@@ -18,28 +18,23 @@
 | Local twins | `localhost` ↔ `127.0.0.1` same port auto-expanded |
 | WebSocket | Not CORS, but `Origin` checked against same allowlist when present (CSWSH) |
 
-Local: `WEB_ORIGIN=http://localhost:4321` in `.dev.vars`.
+Local: set `WEB_ORIGIN` in `workers/api/.dev.vars` if needed (desktop often uses no browser origin).
 
 ## Services
 | Unit | Role | Deploy |
 |---|---|---|
-| `apps/web` | Astro static UI | CF Workers assets → `vidsync.ratt.ing` |
+| `apps/desktop` | Tauri client (create/join/play/stream) | GH Actions → R2 installers |
+| `apps/site` | Landing + download/updater JSON | `wrangler deploy` → `vidsync.ratt.ing` |
 | `workers/api` | REST + WS → Room DO | `wrangler deploy` → `api.vidsync.ratt.ing` |
-| `packages/shared` | Protocol types | consumed by both |
+| `packages/shared` | Protocol types | consumed by API (+ TS clients) |
 
 ## Flow
-1. `POST /rooms` → code + optional seed URL; init DO storage
-2. Browser opens `/r/:code` (rewrite → `/room`) → React island
-3. Island `GET/WSS /rooms/:code/ws` → DO hibernation WebSocket
-4. Host mutates play/pause/seek/url; DO broadcasts `state`
-5. Followers apply drift correction against expected position
+1. Desktop `POST /rooms` (header `X-VidSync-Client: desktop/…`) → code + optional seed URL; init DO storage
+2. Peers join via code; open WSS `/rooms/:code/ws` → DO hibernation WebSocket
+3. Host mutates play/pause/seek/url; DO broadcasts `state`
+4. Followers apply drift correction against expected position
+5. Host may stream local file over LAN HTTP; peers play in system WebView
 
 ## Identity
 - Room code: 8-char Crockford base32
 - DO: `env.ROOMS.getByName(code)`
-
-## Static room routes
-Pure static cannot prerender infinite codes. `apps/web/src/asset-worker.ts`:
-- `run_worker_first: ["/r/*"]`
-- Internal `ASSETS.fetch("/room/")` — **no browser 3xx** (redirects drop the code)
-- Client parses code from pathname `/r/XXXXXXXX`

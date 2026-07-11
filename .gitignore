@@ -1,4 +1,4 @@
-﻿node_modules
+node_modules
 dist
 .astro
 .wrangler
@@ -10,6 +10,14 @@ dist
 .DS_Store
 .turbo
 coverage
+
+# Package manager lockfiles (bun/npm/yarn/pnpm — not committed)
+bun.lock
+bun.lockb
+package-lock.json
+npm-shrinkwrap.json
+yarn.lock
+pnpm-lock.yaml
 
 # Rust
 **/target/
