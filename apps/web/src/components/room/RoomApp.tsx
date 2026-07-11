@@ -19,6 +19,7 @@ import {
 import { parseRoomCodeFromLocation } from "../../lib/roomCode";
 import { applyDrift, SyncClient } from "../../lib/sync/client";
 import { useRoomStore } from "../../lib/store/roomStore";
+import { onUnblockReady, pingUnblock } from "../../lib/unblock/bridge";
 import UnblockStatus from "./UnblockStatus";
 
 function formatTime(ms: number): string {
@@ -88,6 +89,11 @@ export default function RoomApp() {
   const [chatDraft, setChatDraft] = useState("");
   /** Wait for nick pick before opening WS when no local nick yet */
   const [nickReady, setNickReady] = useState(false);
+  const [unblockOn, setUnblockOn] = useState(false);
+  /** Bumps to re-run attachVideoSource */
+  const [mediaReload, setMediaReload] = useState(0);
+  const [forceUnblock, setForceUnblock] = useState(false);
+  const [openingUnblock, setOpeningUnblock] = useState(false);
 
   useEffect(() => {
     const resolved = parseRoomCodeFromLocation(
@@ -170,6 +176,19 @@ export default function RoomApp() {
   }, [chat.length]);
 
   useEffect(() => {
+    void pingUnblock().then((r) => setUnblockOn(r.ok));
+    return onUnblockReady(() => {
+      void pingUnblock().then((r) => setUnblockOn(r.ok));
+    });
+  }, []);
+
+  // New queue item → normal attach unless user forced Unblock this session
+  useEffect(() => {
+    setForceUnblock(false);
+    setOpeningUnblock(false);
+  }, [playback?.videoUrl]);
+
+  useEffect(() => {
     const video = videoRef.current;
     const url = playback?.videoUrl;
     if (!video) return;
@@ -180,12 +199,19 @@ export default function RoomApp() {
 
     if (!url) return;
 
-    sourceRef.current = attachVideoSource(video, url, setMediaError);
+    sourceRef.current = attachVideoSource(video, url, (msg) => {
+      setMediaError(msg);
+      setOpeningUnblock(false);
+    }, {
+      preferUnblock: true,
+      forceUnblock,
+    });
+    setOpeningUnblock(false);
     return () => {
       sourceRef.current?.destroy();
       sourceRef.current = null;
     };
-  }, [playback?.videoUrl, setMediaError]);
+  }, [playback?.videoUrl, mediaReload, forceUnblock, setMediaError]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -334,6 +360,35 @@ export default function RoomApp() {
     } catch {
       setLastError("Could not copy link");
     }
+  };
+
+  /** Reload current queue item through the extension (explicit user action). */
+  const onOpenWithUnblock = () => {
+    if (!playback?.videoUrl) {
+      setLastError("Nothing in the queue yet");
+      return;
+    }
+    if (!unblockOn) {
+      setLastError(
+        "Install VidSync Unblock, reload this tab, then try again.",
+      );
+      return;
+    }
+    setMediaError(null);
+    setLastError(null);
+    setOpeningUnblock(true);
+    setForceUnblock(true);
+    setMediaReload((n) => n + 1);
+  };
+
+  /** Open raw media URL in a new tab (browser / external player). */
+  const onOpenVideoTab = () => {
+    const url = playback?.videoUrl;
+    if (!url) {
+      setLastError("Nothing in the queue yet");
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   const onVideoPlay = () => {
@@ -524,9 +579,45 @@ export default function RoomApp() {
                   </span>
                 </div>
               )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onOpenWithUnblock}
+                  disabled={!hasVideo || openingUnblock}
+                  className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-black disabled:opacity-40"
+                  title={
+                    unblockOn
+                      ? "Reload this stream through the Unblock extension (no page CORS)"
+                      : "Install VidSync Unblock, then reload this tab"
+                  }
+                >
+                  {openingUnblock
+                    ? "Opening…"
+                    : unblockOn
+                      ? "Open with Unblock"
+                      : "Open with Unblock (install ext)"}
+                </button>
+                <button
+                  type="button"
+                  onClick={onOpenVideoTab}
+                  disabled={!hasVideo}
+                  className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-40"
+                  title="Open the raw media URL in a new browser tab"
+                >
+                  Open URL
+                </button>
+                {!unblockOn ? (
+                  <span className="text-[11px] text-[var(--color-muted)]">
+                    Extension not detected — load unpacked + refresh tab
+                  </span>
+                ) : null}
+              </div>
+
               {hasVideo ? (
                 <p className="truncate font-mono text-xs text-[var(--color-muted)]">
                   Now: {playback?.videoUrl}
+                  {forceUnblock ? " · via Unblock" : ""}
                 </p>
               ) : null}
             </div>

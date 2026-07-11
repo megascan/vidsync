@@ -78,8 +78,10 @@ type HlsLoaderCallbacks = {
 };
 
 export type AttachSourceOptions = {
-  /** Prefer extension fetch when installed (HLS always; progressive on failure or force). */
+  /** Prefer extension fetch when installed (HLS loader; progressive on error). */
   preferUnblock?: boolean;
+  /** Always load via extension when installed (user clicked "Open with Unblock"). */
+  forceUnblock?: boolean;
 };
 
 function looksLikeHls(url: string): boolean {
@@ -225,6 +227,9 @@ export function attachVideoSource(
   let hls: HlsLike | null = null;
   let revokeBlob: (() => void) | null = null;
   const preferUnblock = options?.preferUnblock !== false;
+  const forceUnblock = Boolean(options?.forceUnblock) && isUnblockInstalled();
+  const useUnblockLoader =
+    forceUnblock || (preferUnblock && isUnblockInstalled());
 
   const onVideoError = () => {
     const err = video.error;
@@ -235,6 +240,7 @@ export function attachVideoSource(
       isUnblockInstalled() &&
       !looksLikeHls(url) &&
       !revokeBlob &&
+      !forceUnblock &&
       (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ||
         code === MediaError.MEDIA_ERR_NETWORK)
     ) {
@@ -248,9 +254,13 @@ export function attachVideoSource(
       return;
     }
     if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
-      onError("Source not supported or blocked (often CORS). Try VidSync Unblock.");
+      onError(
+        "Source not supported or blocked (often CORS). Click “Open with Unblock”.",
+      );
     } else if (code === MediaError.MEDIA_ERR_NETWORK) {
-      onError("Network error loading media. Try VidSync Unblock or check URL.");
+      onError(
+        "Network error loading media. Click “Open with Unblock” or check URL.",
+      );
     } else {
       onError("Failed to load media.");
     }
@@ -271,7 +281,7 @@ export function attachVideoSource(
           enableWorker: true,
           lowLatencyMode: false,
         };
-        if (preferUnblock && isUnblockInstalled()) {
+        if (useUnblockLoader) {
           config.loader = makeUnblockLoader(Hls.DefaultConfig.loader);
         }
         const instance = new Hls(config) as HlsLike;
@@ -294,11 +304,19 @@ export function attachVideoSource(
             instance.destroy();
           }
         });
-      } else if (canNative) {
+      } else if (canNative && !forceUnblock) {
         video.src = url;
-      } else {
+      } else if (!Hls.isSupported()) {
         onError("HLS not supported in this browser.");
       }
+    });
+  } else if (forceUnblock) {
+    void attachProgressiveUnblock(video, url, onError).then((revoke) => {
+      if (destroyed) {
+        revoke();
+        return;
+      }
+      revokeBlob = revoke;
     });
   } else {
     // Progressive: try direct first (often works without CORS on <video>).
