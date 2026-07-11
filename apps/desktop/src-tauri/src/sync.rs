@@ -1,19 +1,31 @@
 //! WebSocket sync client → Room DO.
+//!
+//! Auto-reconnects on drop (DO hibernation / network blips). Stops on
+//! user leave (`shutdown`) or server `room_closed`.
 
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
+use tokio::net::TcpStream;
 use tracing::{info, warn};
 
 use crate::protocol::{ClientMessage, ServerMessage};
+
+type WsStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SyncEvent {
     Connected,
+    /// Transient drop — will retry. UI should show soft status, not leave room.
+    Reconnecting {
+        attempt: u32,
+        reason: String,
+    },
+    /// Permanent end (user leave or room gone).
     Disconnected {
         reason: String,
     },
@@ -62,118 +74,25 @@ impl SyncHandle {
     }
 }
 
-/// Connect and run until disconnect. Nickname sent on hello.
+enum SessionEnd {
+    UserShutdown,
+    RoomClosed,
+    Dropped { reason: String },
+}
+
+/// Connect with automatic reconnect until leave or room_closed.
+/// First dial is awaited so create/join fails fast if the edge is down.
 pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClientMessage>();
-    let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel::<()>();
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<ClientMessage>();
+    let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel::<()>();
 
     let (ws, _) = connect_async(&ws_url)
         .await
         .with_context(|| format!("ws connect {ws_url}"))?;
-    info!("ws connected {ws_url}");
-    let _ = event_tx.send(SyncEvent::Connected);
 
-    let (mut write, mut read) = ws.split();
-
-    let hello = ClientMessage::Hello {
-        nickname: Some(nickname),
-        client_time_ms: chrono_now(),
-    };
-    let hello_txt = serde_json::to_string(&hello)?;
-    write
-        .send(Message::Text(hello_txt.into()))
-        .await
-        .context("send hello")?;
-
-    let event_tx2 = event_tx.clone();
     tokio::spawn(async move {
-        let mut ping_tick = tokio::time::interval(Duration::from_secs(20));
-        ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // skip first immediate tick
-        ping_tick.tick().await;
-
-        loop {
-            tokio::select! {
-                _ = shutdown_rx.recv() => {
-                    let _ = write.close().await;
-                    let _ = event_tx2.send(SyncEvent::Disconnected {
-                        reason: "closed".into(),
-                    });
-                    break;
-                }
-                _ = ping_tick.tick() => {
-                    // WS-level ping + DO autoResponse text "ping" for hibernation keep-alive
-                    if write.send(Message::Ping(Vec::new().into())).await.is_err() {
-                        let _ = event_tx2.send(SyncEvent::Disconnected {
-                            reason: "ping failed".into(),
-                        });
-                        break;
-                    }
-                    if write.send(Message::Text("ping".into())).await.is_err() {
-                        let _ = event_tx2.send(SyncEvent::Disconnected {
-                            reason: "ping failed".into(),
-                        });
-                        break;
-                    }
-                }
-                msg = out_rx.recv() => {
-                    match msg {
-                        Some(m) => {
-                            match serde_json::to_string(&m) {
-                                Ok(s) => {
-                                    if write.send(Message::Text(s.into())).await.is_err() {
-                                        let _ = event_tx2.send(SyncEvent::Disconnected {
-                                            reason: "send failed".into(),
-                                        });
-                                        break;
-                                    }
-                                }
-                                Err(e) => warn!("serialize client msg: {e}"),
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                incoming = read.next() => {
-                    match incoming {
-                        Some(Ok(Message::Text(t))) => {
-                            // DO autoResponse "pong" — ignore
-                            if t == "pong" {
-                                continue;
-                            }
-                            match serde_json::from_str::<ServerMessage>(&t) {
-                                Ok(sm) => {
-                                    if let Some(ev) = map_server(sm) {
-                                        if event_tx2.send(ev).is_err() {
-                                            break;
-                                        }
-                                    }
-                                }
-                                Err(e) => warn!("bad server msg: {e} raw={t}"),
-                            }
-                        }
-                        Some(Ok(Message::Ping(p))) => {
-                            let _ = write.send(Message::Pong(p)).await;
-                        }
-                        Some(Ok(Message::Pong(_))) => {}
-                        Some(Ok(Message::Close(_))) | None => {
-                            let _ = event_tx2.send(SyncEvent::Disconnected {
-                                reason: "socket closed".into(),
-                            });
-                            break;
-                        }
-                        Some(Ok(_)) => {}
-                        Some(Err(e)) => {
-                            let _ = event_tx2.send(SyncEvent::Disconnected {
-                                reason: format!("{e}"),
-                            });
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        run_reconnect_loop(ws_url, nickname, Some(ws), out_rx, shutdown_rx, event_tx).await;
     });
 
     Ok(SyncHandle {
@@ -181,6 +100,226 @@ pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
         events: event_rx,
         shutdown: Some(shutdown_tx),
     })
+}
+
+async fn run_reconnect_loop(
+    ws_url: String,
+    nickname: String,
+    mut primed: Option<WsStream>,
+    mut out_rx: mpsc::UnboundedReceiver<ClientMessage>,
+    mut shutdown_rx: mpsc::UnboundedReceiver<()>,
+    event_tx: mpsc::UnboundedSender<SyncEvent>,
+) {
+    let mut attempt: u32 = 0;
+
+    loop {
+        let ws = if let Some(ws) = primed.take() {
+            ws
+        } else {
+            // Wait for leave or dial
+            match dial_with_cancel(&ws_url, &mut shutdown_rx).await {
+                DialResult::Shutdown => {
+                    let _ = event_tx.send(SyncEvent::Disconnected {
+                        reason: "closed".into(),
+                    });
+                    return;
+                }
+                DialResult::Ok(ws) => ws,
+                DialResult::Err(reason) => {
+                    attempt = attempt.saturating_add(1);
+                    let delay_ms = reconnect_delay_ms(attempt);
+                    info!("ws dial failed ({reason}); retry #{attempt} in {delay_ms}ms");
+                    let _ = event_tx.send(SyncEvent::Reconnecting {
+                        attempt,
+                        reason: reason.clone(),
+                    });
+                    tokio::select! {
+                        _ = shutdown_rx.recv() => {
+                            let _ = event_tx.send(SyncEvent::Disconnected {
+                                reason: "closed".into(),
+                            });
+                            return;
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                    }
+                    continue;
+                }
+            }
+        };
+
+        match run_session(ws, &nickname, &mut out_rx, &mut shutdown_rx, &event_tx).await {
+            SessionEnd::UserShutdown => {
+                let _ = event_tx.send(SyncEvent::Disconnected {
+                    reason: "closed".into(),
+                });
+                return;
+            }
+            SessionEnd::RoomClosed => {
+                let _ = event_tx.send(SyncEvent::Disconnected {
+                    reason: "room_closed".into(),
+                });
+                return;
+            }
+            SessionEnd::Dropped { reason } => {
+                attempt = attempt.saturating_add(1);
+                let delay_ms = reconnect_delay_ms(attempt);
+                info!("ws dropped ({reason}); reconnect #{attempt} in {delay_ms}ms");
+                let _ = event_tx.send(SyncEvent::Reconnecting {
+                    attempt,
+                    reason: reason.clone(),
+                });
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        let _ = event_tx.send(SyncEvent::Disconnected {
+                            reason: "closed".into(),
+                        });
+                        return;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                }
+                // successful reconnect resets attempt after Connected+Welcome
+            }
+        }
+    }
+}
+
+enum DialResult {
+    Ok(WsStream),
+    Err(String),
+    Shutdown,
+}
+
+async fn dial_with_cancel(
+    ws_url: &str,
+    shutdown_rx: &mut mpsc::UnboundedReceiver<()>,
+) -> DialResult {
+    tokio::select! {
+        _ = shutdown_rx.recv() => DialResult::Shutdown,
+        res = connect_async(ws_url) => match res {
+            Ok((ws, _)) => DialResult::Ok(ws),
+            Err(e) => DialResult::Err(format!("{e}")),
+        }
+    }
+}
+
+fn reconnect_delay_ms(attempt: u32) -> u64 {
+    let exp = 500u64.saturating_mul(1u64 << attempt.min(5));
+    exp.min(10_000)
+}
+
+async fn run_session(
+    ws: WsStream,
+    nickname: &str,
+    out_rx: &mut mpsc::UnboundedReceiver<ClientMessage>,
+    shutdown_rx: &mut mpsc::UnboundedReceiver<()>,
+    event_tx: &mpsc::UnboundedSender<SyncEvent>,
+) -> SessionEnd {
+    info!("ws session start");
+    let _ = event_tx.send(SyncEvent::Connected);
+
+    let (mut write, mut read) = ws.split();
+
+    let hello = ClientMessage::Hello {
+        nickname: Some(nickname.to_string()),
+        client_time_ms: chrono_now(),
+    };
+    match serde_json::to_string(&hello) {
+        Ok(hello_txt) => {
+            if write.send(Message::Text(hello_txt.into())).await.is_err() {
+                return SessionEnd::Dropped {
+                    reason: "hello send failed".into(),
+                };
+            }
+        }
+        Err(e) => {
+            return SessionEnd::Dropped {
+                reason: format!("hello serialize: {e}"),
+            };
+        }
+    }
+
+    let mut ping_tick = tokio::time::interval(Duration::from_secs(20));
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping_tick.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                let _ = write.close().await;
+                return SessionEnd::UserShutdown;
+            }
+            _ = ping_tick.tick() => {
+                if write.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    return SessionEnd::Dropped { reason: "ping failed".into() };
+                }
+                if write.send(Message::Text("ping".into())).await.is_err() {
+                    return SessionEnd::Dropped { reason: "ping failed".into() };
+                }
+            }
+            msg = out_rx.recv() => {
+                match msg {
+                    Some(m) => {
+                        match serde_json::to_string(&m) {
+                            Ok(s) => {
+                                if write.send(Message::Text(s.into())).await.is_err() {
+                                    return SessionEnd::Dropped {
+                                        reason: "send failed".into(),
+                                    };
+                                }
+                            }
+                            Err(e) => warn!("serialize client msg: {e}"),
+                        }
+                    }
+                    None => {
+                        let _ = write.close().await;
+                        return SessionEnd::UserShutdown;
+                    }
+                }
+            }
+            incoming = read.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(t))) => {
+                        if t == "pong" {
+                            continue;
+                        }
+                        match serde_json::from_str::<ServerMessage>(&t) {
+                            Ok(ServerMessage::RoomClosed { reason, message, .. }) => {
+                                let _ = event_tx.send(SyncEvent::RoomClosed {
+                                    reason,
+                                    message,
+                                });
+                                let _ = write.close().await;
+                                return SessionEnd::RoomClosed;
+                            }
+                            Ok(sm) => {
+                                if let Some(ev) = map_server(sm) {
+                                    if event_tx.send(ev).is_err() {
+                                        return SessionEnd::UserShutdown;
+                                    }
+                                }
+                            }
+                            Err(e) => warn!("bad server msg: {e} raw={t}"),
+                        }
+                    }
+                    Some(Ok(Message::Ping(p))) => {
+                        let _ = write.send(Message::Pong(p)).await;
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) | None => {
+                        return SessionEnd::Dropped {
+                            reason: "socket closed".into(),
+                        };
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        return SessionEnd::Dropped {
+                            reason: format!("{e}"),
+                        };
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn map_server(sm: ServerMessage) -> Option<SyncEvent> {

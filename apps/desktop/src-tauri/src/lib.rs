@@ -53,6 +53,8 @@ fn install_sync(app: &AppHandle, state: &AppState, handle: sync::SyncHandle) -> 
                     }
                 }
             }
+            // Only permanent disconnect ends the event pump (user leave / room gone).
+            // Transient drops emit Reconnecting and the sync task reconnects itself.
             let done = matches!(ev, SyncEvent::Disconnected { .. });
             let _ = app.emit("sync-event", &ev);
             if done {

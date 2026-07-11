@@ -30,3 +30,14 @@ Expected position while playing:
 ## Authority
 Only host control msgs. Host WS drop does not dissolve; **45s without host packets** does.
 Max 20 members. Host heartbeat **~5s always** while in room (play or pause) → throttled state broadcast + room liveness.
+
+## Client reconnect (DO drops)
+
+Cloudflare DO WebSockets can drop (hibernation / edge). Clients must reconnect:
+
+| Client | Behavior |
+|---|---|
+| Desktop | Auto-reconnect with backoff (0.5s→10s). Emits `reconnecting` then new `welcome`. Stops on user leave or `room_closed`. Host **MediaHub keeps running** across reconnect. |
+| Web | Same pattern in `SyncClient` |
+
+SessionId changes after reconnect; server re-claims host if previous host socket is dead.

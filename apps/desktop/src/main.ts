@@ -35,6 +35,7 @@ type ServeInfo = {
 
 type SyncEvent =
   | { kind: "connected" }
+  | { kind: "reconnecting"; attempt: number; reason: string }
   | { kind: "disconnected"; reason: string }
   | {
       kind: "welcome";
@@ -424,6 +425,13 @@ function normalizeEvent(raw: unknown): SyncEvent | null {
     };
   }
   if (kind === "connected") return { kind: "connected" };
+  if (kind === "reconnecting") {
+    return {
+      kind: "reconnecting",
+      attempt: Number(pick(o, "attempt") ?? 1),
+      reason: String(pick(o, "reason") ?? "drop"),
+    };
+  }
   if (kind === "disconnected") {
     return {
       kind: "disconnected",
@@ -453,10 +461,31 @@ async function onSync(raw: unknown) {
 
   switch (ev.kind) {
     case "connected":
-      status = "";
+      // Soft clear — welcome follows on (re)join
+      if (error === "Connection lost" || status.startsWith("Reconnecting")) {
+        status = "Connected…";
+        error = "";
+        paint();
+      }
+      break;
+    case "reconnecting":
+      // DO hibernation / network blip — stay in room, soft status
+      error = "";
+      setStatus(
+        ev.attempt <= 1
+          ? "Reconnecting…"
+          : `Reconnecting… (try ${ev.attempt})`,
+      );
       break;
     case "disconnected":
-      setError("Connection lost");
+      // Permanent only (leave / room gone / fatal). Transient uses reconnecting.
+      if (ev.reason === "room_closed") {
+        // room_closed event handles kick
+        break;
+      }
+      if (screen === "room") {
+        setError("Connection lost");
+      }
       break;
     case "welcome":
       sessionId = ev.session_id;
