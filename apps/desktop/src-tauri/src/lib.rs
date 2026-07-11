@@ -1,4 +1,4 @@
-//! VidSync Tauri backend — room sync, local stream, events to UI.
+//! VidSync Tauri backend — room sync, multi-file media hub, events to UI.
 
 mod api;
 mod net;
@@ -11,7 +11,7 @@ mod upnp;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use session::{ServeInfo, ServeOptions, ServeSession};
+use session::{MediaHub, ServeInfo};
 use sync::SyncEvent;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
@@ -19,12 +19,13 @@ use tokio::sync::mpsc;
 use crate::protocol::ClientMessage;
 
 const DEFAULT_API: &str = "https://api.vidsync.ratt.ing";
+const DEFAULT_PORT: u16 = 8765;
 
 struct AppState {
-    /// Outbound WS messages
     sync_tx: Mutex<Option<mpsc::UnboundedSender<ClientMessage>>>,
     sync_shutdown: Mutex<Option<mpsc::UnboundedSender<()>>>,
-    serve: Mutex<Option<ServeSession>>,
+    /// Async mutex — hub methods await while registered.
+    hub: tokio::sync::Mutex<Option<MediaHub>>,
     is_host: Mutex<bool>,
 }
 
@@ -71,9 +72,12 @@ async fn leave_internal(state: &AppState) {
     if let Ok(mut g) = state.sync_tx.lock() {
         *g = None;
     }
-    let prev_serve = state.serve.lock().ok().and_then(|mut g| g.take());
-    if let Some(s) = prev_serve {
-        s.stop().await;
+    let hub = {
+        let mut g = state.hub.lock().await;
+        g.take()
+    };
+    if let Some(h) = hub {
+        h.stop().await;
     }
     if let Ok(mut h) = state.is_host.lock() {
         *h = false;
@@ -84,6 +88,23 @@ fn send_msg(state: &AppState, msg: ClientMessage) -> Result<(), String> {
     let g = state.sync_tx.lock().map_err(err)?;
     let tx = g.as_ref().ok_or_else(|| "not connected".to_string())?;
     tx.send(msg).map_err(|_| "sync channel closed".to_string())
+}
+
+/// Register local file on the hub and return share URL.
+async fn register_file(state: &AppState, path: String) -> Result<ServeInfo, String> {
+    let mut hub = state.hub.lock().await;
+    if hub.is_none() {
+        let started = MediaHub::start(DEFAULT_PORT, true)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        *hub = Some(started);
+    }
+    let path = PathBuf::from(path);
+    hub.as_ref()
+        .ok_or_else(|| "media hub not ready".to_string())?
+        .add_file(path)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -183,52 +204,75 @@ fn host_heartbeat(
     )
 }
 
+/// Open a local file: register on hub, add to room queue, switch everyone to it.
 #[tauri::command]
 async fn stream_start(
     state: State<'_, AppState>,
     path: String,
-    port: u16,
-    upnp: bool,
+    #[allow(unused_variables)] port: u16,
+    #[allow(unused_variables)] upnp: bool,
 ) -> Result<ServeInfo, String> {
-    let prev = state.serve.lock().ok().and_then(|mut g| g.take());
-    if let Some(s) = prev {
-        s.stop().await;
+    if !state.is_host.lock().map(|x| *x).unwrap_or(false) {
+        return Err("only host can open videos".into());
     }
-
-    let session = ServeSession::start(ServeOptions {
-        file: PathBuf::from(path),
-        port,
-        bind: "0.0.0.0".into(),
-        upnp,
-        external_port: 0,
-        lease_secs: 0,
-        clipboard: true,
-    })
-    .await
-    .map_err(|e| format!("{e:#}"))?;
-
-    let info = session.info.clone();
+    let info = register_file(&state, path).await?;
     let url = info.primary_url().to_string();
+    // set_url appends if new and switches current
+    send_msg(&state, ClientMessage::SetUrl { url })?;
+    session::try_clipboard(info.primary_url());
+    Ok(info)
+}
 
-    if state.is_host.lock().map(|x| *x).unwrap_or(false) {
-        let _ = send_msg(
-            &state,
-            ClientMessage::QueueAdd {
-                url,
-                play_if_idle: true,
-            },
-        );
+/// Register file and append to queue without forcing a switch.
+#[tauri::command]
+async fn queue_add_file(state: State<'_, AppState>, path: String) -> Result<ServeInfo, String> {
+    if !state.is_host.lock().map(|x| *x).unwrap_or(false) {
+        return Err("only host can queue videos".into());
     }
-
-    *state.serve.lock().map_err(err)? = Some(session);
+    let info = register_file(&state, path).await?;
+    let url = info.primary_url().to_string();
+    send_msg(
+        &state,
+        ClientMessage::QueueAdd {
+            url,
+            play_if_idle: true,
+        },
+    )?;
     Ok(info)
 }
 
 #[tauri::command]
+fn queue_play(state: State<'_, AppState>, index: u32) -> Result<(), String> {
+    if !state.is_host.lock().map(|x| *x).unwrap_or(false) {
+        return Err("only host can change the queue".into());
+    }
+    send_msg(&state, ClientMessage::QueuePlay { index })
+}
+
+#[tauri::command]
+fn queue_remove(state: State<'_, AppState>, index: u32) -> Result<(), String> {
+    if !state.is_host.lock().map(|x| *x).unwrap_or(false) {
+        return Err("only host can change the queue".into());
+    }
+    send_msg(&state, ClientMessage::QueueRemove { index })
+}
+
+#[tauri::command]
+fn queue_clear(state: State<'_, AppState>) -> Result<(), String> {
+    if !state.is_host.lock().map(|x| *x).unwrap_or(false) {
+        return Err("only host can change the queue".into());
+    }
+    send_msg(&state, ClientMessage::QueueClear {})
+}
+
+#[tauri::command]
 async fn stream_stop(state: State<'_, AppState>) -> Result<(), String> {
-    let prev = state.serve.lock().ok().and_then(|mut g| g.take());
-    if let Some(s) = prev {
-        s.stop().await;
+    let hub = {
+        let mut g = state.hub.lock().await;
+        g.take()
+    };
+    if let Some(h) = hub {
+        h.stop().await;
     }
     Ok(())
 }
@@ -248,7 +292,7 @@ pub fn run() {
         .manage(AppState {
             sync_tx: Mutex::new(None),
             sync_shutdown: Mutex::new(None),
-            serve: Mutex::new(None),
+            hub: tokio::sync::Mutex::new(None),
             is_host: Mutex::new(false),
         })
         .invoke_handler(tauri::generate_handler![
@@ -262,6 +306,10 @@ pub fn run() {
             host_seek,
             host_heartbeat,
             stream_start,
+            queue_add_file,
+            queue_play,
+            queue_remove,
+            queue_clear,
             stream_stop,
         ])
         .run(tauri::generate_context!())

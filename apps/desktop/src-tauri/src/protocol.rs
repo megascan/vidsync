@@ -47,6 +47,10 @@ pub enum ClientMessage {
         #[serde(rename = "clientTimeMs")]
         client_time_ms: i64,
     },
+    /// Add URL and switch to it (also appends to queue if new).
+    SetUrl {
+        url: String,
+    },
     QueueAdd {
         url: String,
         #[serde(rename = "playIfIdle")]

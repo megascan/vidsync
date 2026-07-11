@@ -1,5 +1,6 @@
-//! HTTP file server with Range support (required for video seeking).
+//! HTTP multi-file server with Range support (seek).
 
+use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,16 +14,18 @@ use axum::Router;
 use rand::Rng;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::RwLock;
 use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 
-pub struct AppState {
+#[derive(Clone)]
+pub struct FileEntry {
     pub path: PathBuf,
-    pub token: String,
     pub mime: String,
     pub file_name: String,
 }
+
+pub type FileRegistry = Arc<RwLock<HashMap<String, FileEntry>>>;
 
 pub fn random_token() -> String {
     const ALPH: &[u8] = b"abcdefghijkmnopqrstuvwxyz23456789";
@@ -39,7 +42,7 @@ pub fn guess_mime(path: &Path) -> String {
         .to_string()
 }
 
-pub fn router(state: Arc<AppState>) -> Router {
+pub fn router(registry: FileRegistry) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -55,50 +58,51 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(index))
         .route("/s/{token}", get(stream_token))
         .route("/s/{token}/{name}", get(stream_named))
-        .with_state(state)
+        .with_state(registry)
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
 }
 
-async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn index(State(reg): State<FileRegistry>) -> impl IntoResponse {
+    let n = reg.read().await.len();
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        format!(
-            "VidSync Host\nfile: {}\nmime: {}\nstream: /s/{}\n",
-            state.file_name, state.mime, state.token
-        ),
+        format!("VidSync Host\nfiles: {n}\n"),
     )
 }
 
 async fn stream_token(
-    State(state): State<Arc<AppState>>,
+    State(reg): State<FileRegistry>,
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    stream_inner(state, token, headers).await
+    stream_inner(reg, token, headers).await
 }
 
 async fn stream_named(
-    State(state): State<Arc<AppState>>,
+    State(reg): State<FileRegistry>,
     AxumPath((token, _name)): AxumPath<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    stream_inner(state, token, headers).await
+    stream_inner(reg, token, headers).await
 }
 
-async fn stream_inner(state: Arc<AppState>, token: String, headers: HeaderMap) -> Response {
-    if token != state.token {
+async fn stream_inner(reg: FileRegistry, token: String, headers: HeaderMap) -> Response {
+    let entry = {
+        let map = reg.read().await;
+        map.get(&token).cloned()
+    };
+    let Some(entry) = entry else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
+    };
 
-    let meta = match tokio::fs::metadata(&state.path).await {
+    let meta = match tokio::fs::metadata(&entry.path).await {
         Ok(m) => m,
         Err(_) => return (StatusCode::NOT_FOUND, "file gone").into_response(),
     };
     let len = meta.len();
 
-    let mut file = match File::open(&state.path).await {
+    let mut file = match File::open(&entry.path).await {
         Ok(f) => f,
         Err(_) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, "open failed").into_response();
@@ -123,7 +127,7 @@ async fn stream_inner(state: Arc<AppState>, token: String, headers: HeaderMap) -
 
                 Response::builder()
                     .status(StatusCode::PARTIAL_CONTENT)
-                    .header(header::CONTENT_TYPE, state.mime.as_str())
+                    .header(header::CONTENT_TYPE, entry.mime.as_str())
                     .header(header::ACCEPT_RANGES, "bytes")
                     .header(header::CONTENT_LENGTH, content_len)
                     .header(
@@ -132,14 +136,14 @@ async fn stream_inner(state: Arc<AppState>, token: String, headers: HeaderMap) -
                     )
                     .header(
                         header::CONTENT_DISPOSITION,
-                        format!("inline; filename=\"{}\"", state.file_name),
+                        format!("inline; filename=\"{}\"", entry.file_name),
                     )
                     .body(body)
                     .unwrap_or_else(|e| {
                         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
                     })
             }
-            Ok(None) => full_response(file, len, &state).await,
+            Ok(None) => full_response(file, len, &entry).await,
             Err(msg) => Response::builder()
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                 .header(header::CONTENT_RANGE, format!("bytes */{len}"))
@@ -149,27 +153,26 @@ async fn stream_inner(state: Arc<AppState>, token: String, headers: HeaderMap) -
                 }),
         }
     } else {
-        full_response(file, len, &state).await
+        full_response(file, len, &entry).await
     }
 }
 
-async fn full_response(file: File, len: u64, state: &AppState) -> Response {
+async fn full_response(file: File, len: u64, entry: &FileEntry) -> Response {
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, state.mime.as_str())
+        .header(header::CONTENT_TYPE, entry.mime.as_str())
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, len)
         .header(
             header::CONTENT_DISPOSITION,
-            format!("inline; filename=\"{}\"", state.file_name),
+            format!("inline; filename=\"{}\"", entry.file_name),
         )
         .body(body)
         .unwrap_or_else(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
 }
 
-/// Parse `bytes=start-end` (single range only). Returns inclusive (start, end).
 fn parse_single_bytes_range(header: &str, file_len: u64) -> Result<Option<(u64, u64)>, String> {
     let header = header.trim();
     if !header.starts_with("bytes=") {

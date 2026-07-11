@@ -143,7 +143,8 @@ function hasMedia(): boolean {
 }
 
 async function applyState(state: PlaybackState, force: boolean) {
-  const urlChanged = playback?.videoUrl !== state.videoUrl;
+  const prevUrl = playback?.videoUrl ?? null;
+  const urlChanged = prevUrl !== state.videoUrl;
   const ver = state.version;
   playback = state;
 
@@ -153,13 +154,13 @@ async function applyState(state: PlaybackState, force: boolean) {
   }
   lastVersion = ver;
 
+  // Host owns the element for local open; still apply URL changes from set_url/queue
   const drive = !isHost || force || urlChanged;
   if (drive && state.videoUrl) {
     applyingRemote = true;
     try {
-      if (urlChanged || force || video.src !== state.videoUrl) {
-        video.src = state.videoUrl;
-        video.load();
+      if (urlChanged || force || !video.src || !video.src.includes(tokenFromUrl(state.videoUrl))) {
+        await loadVideoSrc(state.videoUrl);
       }
       const targetSec = expectedPos(state) / 1000;
       if (
@@ -178,8 +179,44 @@ async function applyState(state: PlaybackState, force: boolean) {
         applyingRemote = false;
       });
     }
+  } else if (drive && !state.videoUrl) {
+    applyingRemote = true;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    applyingRemote = false;
   }
   paint();
+}
+
+function tokenFromUrl(url: string): string {
+  try {
+    const p = new URL(url).pathname;
+    const m = p.match(/\/s\/([^/]+)/);
+    return m?.[1] ?? url;
+  } catch {
+    return url;
+  }
+}
+
+/** Hard-reset media element so switching files never sticks on the old stream. */
+async function loadVideoSrc(url: string): Promise<void> {
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  video.src = url;
+  video.load();
+  await new Promise<void>((resolve) => {
+    const done = () => {
+      video.removeEventListener("loadedmetadata", done);
+      video.removeEventListener("error", done);
+      resolve();
+    };
+    video.addEventListener("loadedmetadata", done, { once: true });
+    video.addEventListener("error", done, { once: true });
+    // safety
+    window.setTimeout(done, 4000);
+  });
 }
 
 function wireVideoHostEvents() {
@@ -388,8 +425,7 @@ async function doLeave() {
   paint();
 }
 
-async function doStreamFile() {
-  if (!isHost || busy) return;
+async function pickVideoFile(): Promise<string | null> {
   const selected = await open({
     multiple: false,
     filters: [
@@ -399,24 +435,85 @@ async function doStreamFile() {
       },
     ],
   });
-  if (!selected || typeof selected !== "string") return;
+  if (!selected || typeof selected !== "string") return null;
+  return selected;
+}
+
+/** Open file and switch room to it (adds to queue). */
+async function doStreamFile() {
+  if (!isHost || busy) return;
+  const path = await pickVideoFile();
+  if (!path) return;
   busy = true;
   setStatus("Opening video…");
   try {
     const info = await invoke<ServeInfo>("stream_start", {
-      path: selected,
+      path,
       port: STREAM_PORT,
       upnp: USE_UPNP,
     });
     streamInfo = info;
-    const url = info.publicUrl ?? info.lanUrl;
-    await navigator.clipboard.writeText(url).catch(() => undefined);
-    toast(`Playing ${info.fileName}`);
+    // Local play immediately (state event follows)
+    applyingRemote = true;
+    try {
+      await loadVideoSrc(info.publicUrl ?? info.lanUrl);
+      await video.play().catch(() => undefined);
+    } finally {
+      applyingRemote = false;
+    }
+    toast(info.fileName);
   } catch (e) {
     setError(friendlyErr(e));
   } finally {
     busy = false;
     paint();
+  }
+}
+
+/** Add file to queue without forcing a switch (unless nothing playing). */
+async function doQueueAdd() {
+  if (!isHost || busy) return;
+  const path = await pickVideoFile();
+  if (!path) return;
+  busy = true;
+  setStatus("Adding…");
+  try {
+    const info = await invoke<ServeInfo>("queue_add_file", { path });
+    streamInfo = info;
+    toast(`Queued ${info.fileName}`);
+  } catch (e) {
+    setError(friendlyErr(e));
+  } finally {
+    busy = false;
+    paint();
+  }
+}
+
+async function doQueuePlay(index: number) {
+  if (!isHost || busy) return;
+  try {
+    await invoke("queue_play", { index });
+  } catch (e) {
+    setError(friendlyErr(e));
+  }
+}
+
+async function doQueueRemove(index: number) {
+  if (!isHost || busy) return;
+  try {
+    await invoke("queue_remove", { index });
+  } catch (e) {
+    setError(friendlyErr(e));
+  }
+}
+
+async function doQueueClear() {
+  if (!isHost || busy) return;
+  try {
+    await invoke("queue_clear");
+    streamInfo = null;
+  } catch (e) {
+    setError(friendlyErr(e));
   }
 }
 
@@ -478,6 +575,12 @@ function bindUiOnce() {
       case "stream":
         void doStreamFile();
         break;
+      case "queueAdd":
+        void doQueueAdd();
+        break;
+      case "queueClear":
+        void doQueueClear();
+        break;
       case "play":
         void video.play();
         void invoke("host_play", {
@@ -498,6 +601,19 @@ function bindUiOnce() {
         break;
       default:
         break;
+    }
+
+    // Queue item actions
+    const remItem = (e.target as HTMLElement).closest<HTMLElement>("[data-q-remove]");
+    if (remItem && isHost) {
+      const i = Number(remItem.dataset.qRemove);
+      if (Number.isFinite(i)) void doQueueRemove(i);
+      return;
+    }
+    const playItem = (e.target as HTMLElement).closest<HTMLElement>("[data-q-play]");
+    if (playItem && isHost) {
+      const i = Number(playItem.dataset.qPlay);
+      if (Number.isFinite(i)) void doQueuePlay(i);
     }
   });
 
@@ -624,9 +740,8 @@ function paint() {
             ${
               isHost
                 ? `
-              <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>
-                ${media ? "Open video…" : "Open video…"}
-              </button>
+              <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>Play file…</button>
+              <button type="button" id="queueAdd" ${busy ? "disabled" : ""}>Add to queue</button>
               <button type="button" id="play" ${!media || busy ? "disabled" : ""}>Play</button>
               <button type="button" id="pause" ${!media || busy ? "disabled" : ""}>Pause</button>
             `
@@ -663,18 +778,35 @@ function paint() {
             </ul>
           </div>
           <div class="panel">
-            <p class="panel-title">Queue</p>
+            <div class="panel-head">
+              <p class="panel-title">Queue</p>
+              ${
+                isHost && (playback?.queue?.length ?? 0) > 0
+                  ? `<button type="button" class="ghost sm" id="queueClear">Clear</button>`
+                  : ""
+              }
+            </div>
             <ul class="queue">
               ${
                 (playback?.queue ?? [])
                   .map((u, i) => {
                     const active = playback?.queueIndex === i;
+                    if (isHost) {
+                      return `<li class="q-item ${active ? "active" : ""}">
+                        <button type="button" class="q-play" data-q-play="${i}" title="Play">
+                          <span class="dot">${active ? "●" : "○"}</span>
+                          <span class="qtext" title="${escapeAttr(u)}">${escapeHtml(shortUrl(u))}</span>
+                        </button>
+                        <button type="button" class="ghost sm q-x" data-q-remove="${i}" title="Remove" aria-label="Remove">×</button>
+                      </li>`;
+                    }
                     return `<li class="${active ? "active" : ""}">
                       <span class="dot">${active ? "●" : "○"}</span>
                       <span class="qtext" title="${escapeAttr(u)}">${escapeHtml(shortUrl(u))}</span>
                     </li>`;
                   })
-                  .join("") || `<li class="empty" style="color:var(--faint)">Empty</li>`
+                  .join("") ||
+                `<li class="empty" style="color:var(--faint)">${isHost ? "Add videos with Play file or Add to queue" : "Empty"}</li>`
               }
             </ul>
           </div>

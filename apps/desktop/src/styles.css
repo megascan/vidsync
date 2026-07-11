@@ -408,12 +408,70 @@ input:disabled {
   border-bottom: 1px solid var(--border-soft);
 }
 
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .panel-title {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 0.72rem;
   font-weight: 600;
   color: var(--faint);
   letter-spacing: 0.02em;
+}
+
+.panel-head .panel-title {
+  margin: 0;
+}
+
+button.sm {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.72rem;
+}
+
+.q-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.q-play {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 4px 2px;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.q-play:hover:not(:disabled) {
+  background: var(--elevated-2);
+}
+
+.q-item.active .q-play {
+  color: var(--accent);
+}
+
+.q-x {
+  flex-shrink: 0;
+  color: var(--faint);
+  line-height: 1;
+  padding: 0.15rem 0.35rem;
+}
+
+.q-x:hover:not(:disabled) {
+  color: var(--danger);
 }
 
 .people {
