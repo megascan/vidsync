@@ -6,7 +6,7 @@
 - Desktop create skips Turnstile (`X-VidSync-Client: desktop/…`) — **need CF rate-limit / IP bucket** before abuse (same as member-cap gap).
 - No IP rate limiting yet beyond member cap — add CF rate-limit rules or Worker bucket before public launch.
 - Desktop player is a separate WebView window (not embedded in egui yet); host chrome controls IPC→DO; polish embed later.
-- Linux needs webkit2gtk system package for WebView (documented, not an end-user “download app”).
+- Linux: webkit2gtk-4.1 runtime; AppImage needs FUSE. DMABUF disabled by default for NVIDIA/Wayland — re-enable later if upstream stabilizes.
 - Web + Unblock extension are legacy paths; remove when desktop is default for all users.
 - Static `/r/:code` needs deploy rewrite to `/room` — not wired until CF assets deploy config.
 - Media CORS proxy not implemented; broken third-party URLs fail client-side only.

@@ -62,4 +62,26 @@ UI invokes `room_create`, `room_join`, `stream_start`, `host_play`, …
 |---|---|
 | Windows | WebView2 |
 | macOS | WKWebView |
-| Linux | webkit2gtk (system package) |
+| Linux | webkit2gtk-4.1 (system) |
+
+### Linux crashes / blank window
+
+WebKitGTK + NVIDIA/Wayland often dies on DMABUF. `main.rs` sets before webview:
+
+| Env | Default |
+|---|---|
+| `WEBKIT_DISABLE_DMABUF_RENDERER` | `1` |
+| `__NV_DISABLE_EXPLICIT_SYNC` | `1` |
+
+Still broken? Try:
+
+```bash
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+# or force X11:
+export VIDSYNC_FORCE_X11=1
+./VidSync-linux.AppImage
+```
+
+**AppImage:** `chmod +x`, needs FUSE (or extract: `./VidSync-linux.AppImage --appimage-extract-and-run`).
+
+**Deb deps:** `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1`.

@@ -1,6 +1,6 @@
 [package]
 name = "vidsync-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "VidSync desktop (Tauri) — lobby, stream, native player"
 authors = ["strange"]
 edition = "2021"
