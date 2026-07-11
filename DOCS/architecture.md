@@ -1,10 +1,18 @@
 # Architecture
 
+## Domains
+| Host | Unit |
+|---|---|
+| `https://vidsync.ratt.ing` | `apps/web` static |
+| `https://api.vidsync.ratt.ing` | `workers/api` |
+
+CORS allowlist: `WEB_ORIGIN=https://vidsync.ratt.ing`
+
 ## Services
 | Unit | Role | Deploy |
 |---|---|---|
-| `apps/web` | Astro static UI | CF Workers static assets |
-| `workers/api` | REST + WS → Room DO | `wrangler deploy` |
+| `apps/web` | Astro static UI | CF Workers assets → `vidsync.ratt.ing` |
+| `workers/api` | REST + WS → Room DO | `wrangler deploy` → `api.vidsync.ratt.ing` |
 | `packages/shared` | Protocol types | consumed by both |
 
 ## Flow

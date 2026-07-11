@@ -5,8 +5,14 @@
   "compatibility_date": "2026-04-07",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "WEB_ORIGIN": "http://localhost:4321"
+    "WEB_ORIGIN": "https://vidsync.ratt.ing"
   },
+  "routes": [
+    {
+      "pattern": "api.vidsync.ratt.ing",
+      "custom_domain": true
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

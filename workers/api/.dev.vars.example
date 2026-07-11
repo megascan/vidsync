@@ -1,2 +1,4 @@
 # Copy to .dev.vars (gitignored). Production: wrangler secret put TURNSTILE_SECRET_KEY
 TURNSTILE_SECRET_KEY=your-turnstile-secret-key
+# Local override (prod default in wrangler.jsonc is https://vidsync.ratt.ing)
+WEB_ORIGIN=http://localhost:4321

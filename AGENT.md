@@ -19,7 +19,8 @@ Anonymous watch-party: rooms sync raw video stream URLs.
 ## Commands
 - `bun run dev:web` — Astro
 - `bun run dev:api` — wrangler dev (DO local)
-- `PUBLIC_API_URL` web, `WEB_ORIGIN` worker
+- Prod: web `https://vidsync.ratt.ing`, API `https://api.vidsync.ratt.ing`
+- `PUBLIC_API_URL` web, `WEB_ORIGIN` worker (prod defaults; local via `.env` / `.dev.vars`)
 - Turnstile: `PUBLIC_TURNSTILE_SITE_KEY` (web), `TURNSTILE_SECRET_KEY` in `workers/api/.dev.vars` (never commit)
 - Create room requires captcha; join does not
 

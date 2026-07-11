@@ -12,7 +12,7 @@ export { Room };
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const origin = request.headers.get("Origin");
-    const allowed = env.WEB_ORIGIN || "http://localhost:4321";
+    const allowed = env.WEB_ORIGIN || "https://vidsync.ratt.ing";
 
     if (request.method === "OPTIONS") {
       return new Response(null, {

@@ -18,6 +18,7 @@ function roomPrettyUrlDev() {
 }
 
 export default defineConfig({
+  site: "https://vidsync.ratt.ing",
   output: "static",
   integrations: [react()],
   vite: {
@@ -28,7 +29,8 @@ export default defineConfig({
       PUBLIC_API_URL: envField.string({
         context: "client",
         access: "public",
-        default: "http://localhost:8787",
+        // Prod default; local: apps/web/.env (PUBLIC_API_URL=http://localhost:8787)
+        default: "https://api.vidsync.ratt.ing",
       }),
       PUBLIC_TURNSTILE_SITE_KEY: envField.string({
         context: "client",
