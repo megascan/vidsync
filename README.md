@@ -17,6 +17,11 @@ packages/shared   Protocol (zod)
 DOCS/             Architecture notes
 ```
 
+## Optional: VidSync Unblock (extension)
+
+CORS-stubborn streams without a media proxy: load unpacked  
+`extensions/vidsync-unblock` (see its README). Room shows **Unblock on** when active.
+
 ## Local dev
 
 ```bash
