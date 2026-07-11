@@ -28,5 +28,5 @@ Expected position while playing:
 - Client may keep a short local scrollback only
 
 ## Authority
-Only host control msgs. Host disconnect → oldest session becomes host.
-Max 20 members. Heartbeat ~5s from host while playing → throttled state broadcast.
+Only host control msgs. Host WS drop does not dissolve; **45s without host packets** does.
+Max 20 members. Host heartbeat **~5s always** while in room (play or pause) → throttled state broadcast + room liveness.

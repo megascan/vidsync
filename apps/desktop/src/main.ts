@@ -354,14 +354,20 @@ function wireVideoHostEvents() {
   };
 }
 
+// Host keepalive every 5s while in room (playing OR paused). Server uses this
+// as proof of life — room only dies after HOST_STALE_MS without host packets.
 setInterval(() => {
-  if (screen !== "room" || !playback?.videoUrl) return;
-  if (isHost && playback.isPlaying && !applyingRemote) {
+  if (screen !== "room") return;
+
+  if (isHost && !applyingRemote) {
     void invoke("host_heartbeat", {
       positionMs: (video.currentTime || 0) * 1000,
-      isPlaying: !video.paused,
+      isPlaying: playback?.videoUrl ? !video.paused : false,
     });
-  } else if (!isHost && !applyingRemote) {
+    return;
+  }
+
+  if (!isHost && playback?.videoUrl && !applyingRemote) {
     const target = expectedPos(playback) / 1000;
     if (Math.abs((video.currentTime || 0) - target) > 0.45) {
       applyingRemote = true;

@@ -6,14 +6,20 @@ export const MAX_NICKNAME_LENGTH = 24;
 export const MAX_VIDEO_URL_LENGTH = 2048;
 export const MAX_QUEUE_LENGTH = 50;
 export const MAX_CHAT_LENGTH = 280;
+/** Host should emit heartbeat this often while in a room (playing or not). */
 export const HOST_HEARTBEAT_MS = 5000;
 /**
- * After the last client disconnects (no host-leave case), wait this long
- * before wiping. Host leave closes the room immediately.
+ * After the last client disconnects, wait this long before wiping.
+ * Short blips should not kill the room.
  */
-export const EMPTY_ROOM_GRACE_MS = 5_000;
+export const EMPTY_ROOM_GRACE_MS = 30_000;
 /** @deprecated use EMPTY_ROOM_GRACE_MS */
 export const ROOM_IDLE_TTL_MS = EMPTY_ROOM_GRACE_MS;
+/**
+ * No host application traffic (heartbeat/play/pause/…) for this long → dissolve.
+ * Host WS close alone is NOT enough; transient disconnects are common.
+ */
+export const HOST_STALE_MS = 45_000;
 /** Min ms between chat messages per session (stateless flood control). */
 export const CHAT_COOLDOWN_MS = 400;
 

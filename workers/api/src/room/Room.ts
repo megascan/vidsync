@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   CHAT_COOLDOWN_MS,
   EMPTY_ROOM_GRACE_MS,
+  HOST_STALE_MS,
   MAX_MEMBERS,
   MAX_QUEUE_LENGTH,
   clientMessageSchema,
@@ -26,6 +27,8 @@ type StoredRoom = {
   code: string;
   createdAtMs: number;
   lastActiveAtMs: number;
+  /** Last host application message (heartbeat, play, pause, …). */
+  lastHostActivityAtMs: number;
   state: PlaybackState;
 };
 
@@ -53,6 +56,10 @@ export class Room extends DurableObject<Env> {
       const stored = (await this.ctx.storage.get<StoredRoom>("room")) ?? null;
       if (stored) {
         stored.state = normalizePlaybackState(stored.state);
+        if (!stored.lastHostActivityAtMs) {
+          stored.lastHostActivityAtMs =
+            stored.lastActiveAtMs || stored.createdAtMs || Date.now();
+        }
         this.room = stored;
       } else {
         this.room = null;
@@ -94,7 +101,6 @@ export class Room extends DurableObject<Env> {
     const now = Date.now();
     if (!this.room) {
       let state = emptyPlaybackState(now);
-      // Optional seed URL into queue (create can also be empty sync group)
       if (body.videoUrl && isAllowedVideoUrl(body.videoUrl)) {
         state = {
           ...state,
@@ -110,6 +116,7 @@ export class Room extends DurableObject<Env> {
         code: body.code,
         createdAtMs: now,
         lastActiveAtMs: now,
+        lastHostActivityAtMs: now,
         state,
       };
       await this.persist();
@@ -230,41 +237,81 @@ export class Room extends DurableObject<Env> {
     }
 
     if (!this.room || !session) {
-      await this.scheduleEmptyRoomCleanup();
+      await this.scheduleMaintenanceAlarm();
       return;
     }
 
-    // Host left → room dies immediately; everyone kicked
-    if (this.room.state.hostSessionId === session.sessionId) {
-      await this.dissolveRoom("host_left", "Host left — room closed");
+    const wasHost = this.room.state.hostSessionId === session.sessionId;
+
+    // Host socket drop is NOT instant room death — heartbeat/activity decides.
+    // Peers stay; host can rejoin or room dissolves after HOST_STALE_MS quiet.
+    if (wasHost) {
+      this.broadcastMembers();
+      await this.scheduleMaintenanceAlarm();
       return;
     }
 
     if (this.openConnectionCount() > 0) {
       this.broadcastMembers();
-      await this.ctx.storage.deleteAlarm();
+      await this.scheduleMaintenanceAlarm();
       return;
     }
 
-    // Last non-host left — short grace then wipe
-    await this.scheduleEmptyRoomCleanup();
+    await this.scheduleMaintenanceAlarm();
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
     this.sessions.delete(ws);
-    await this.scheduleEmptyRoomCleanup();
+    await this.scheduleMaintenanceAlarm();
   }
 
   async alarm(): Promise<void> {
-    // Still someone connected? keep the room
-    if (this.openConnectionCount() > 0) {
+    const now = Date.now();
+
+    // Nobody connected → empty grace wipe
+    if (this.openConnectionCount() === 0) {
+      if (!this.room) {
+        await this.ctx.storage.deleteAll();
+        return;
+      }
+      const idleFor = now - (this.room.lastActiveAtMs || 0);
+      if (idleFor >= this.emptyGraceMs()) {
+        this.room = null;
+        this.sessions.clear();
+        await this.ctx.storage.deleteAll();
+        return;
+      }
+      await this.ctx.storage.setAlarm(
+        (this.room.lastActiveAtMs || now) + this.emptyGraceMs(),
+      );
+      return;
+    }
+
+    if (!this.room) {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    // Everybody left (and grace elapsed) — delete room state entirely
-    this.room = null;
-    this.sessions.clear();
-    await this.ctx.storage.deleteAll();
+
+    // Host gone (no live socket) and silent too long → dissolve
+    if (!this.isHostLive()) {
+      const quietFor = now - (this.room.lastHostActivityAtMs || 0);
+      if (quietFor >= this.hostStaleMs()) {
+        await this.dissolveRoom(
+          "host_left",
+          "Host disconnected — room closed",
+        );
+        return;
+      }
+      await this.ctx.storage.setAlarm(
+        (this.room.lastHostActivityAtMs || now) + this.hostStaleMs(),
+      );
+      return;
+    }
+
+    // Host live — no wipe. Optional next check far out if they go quiet.
+    await this.ctx.storage.setAlarm(
+      (this.room.lastHostActivityAtMs || now) + this.hostStaleMs(),
+    );
   }
 
   private async handleClientMessage(
@@ -283,7 +330,9 @@ export class Room extends DurableObject<Env> {
       this.sessions.set(ws, session);
 
       const now = Date.now();
-      if (!this.room.state.hostSessionId) {
+      // Claim host if none, or if previous host session is no longer connected
+      // (reconnect after soft-disconnect / network blip).
+      if (!this.room.state.hostSessionId || !this.isHostLive()) {
         this.room.state = {
           ...this.room.state,
           hostSessionId: session.sessionId,
@@ -291,10 +340,15 @@ export class Room extends DurableObject<Env> {
           updatedAtMs: now,
           serverAnchorMs: now,
         };
+        this.room.lastHostActivityAtMs = now;
         await this.persist();
       }
 
       const isHost = this.room.state.hostSessionId === session.sessionId;
+      if (isHost) {
+        this.room.lastHostActivityAtMs = now;
+      }
+
       this.send(ws, {
         type: "welcome",
         sessionId: session.sessionId,
@@ -305,6 +359,7 @@ export class Room extends DurableObject<Env> {
       });
       this.broadcastMembers();
       await this.touch();
+      await this.scheduleMaintenanceAlarm();
       return;
     }
 
@@ -326,7 +381,6 @@ export class Room extends DurableObject<Env> {
       return;
     }
 
-    // Stateless chat: broadcast only, not persisted (dies with connections / hibernate)
     if (msg.type === "chat") {
       const now = Date.now();
       const last = session.lastChatMs ?? 0;
@@ -386,10 +440,12 @@ export class Room extends DurableObject<Env> {
         version: this.room.state.version + 1,
         updatedAtMs: now,
       };
+      this.room.lastHostActivityAtMs = now;
       await this.persist();
       this.broadcastState();
       this.broadcastMembers();
       await this.touch();
+      await this.scheduleMaintenanceAlarm();
       return;
     }
 
@@ -403,10 +459,11 @@ export class Room extends DurableObject<Env> {
     }
 
     const now = Date.now();
+    // Any host control/heartbeat counts as activity (keeps room alive)
+    this.room.lastHostActivityAtMs = now;
 
     switch (msg.type) {
       case "set_url": {
-        // Compat: add to queue and select as current (play immediately after load)
         if (
           !this.room.state.queue.includes(msg.url) &&
           this.room.state.queue.length >= MAX_QUEUE_LENGTH
@@ -532,6 +589,7 @@ export class Room extends DurableObject<Env> {
           await this.persist();
         }
         await this.touch();
+        await this.scheduleMaintenanceAlarm();
         return;
       }
       default: {
@@ -542,6 +600,7 @@ export class Room extends DurableObject<Env> {
     await this.persist();
     this.broadcastState();
     await this.touch();
+    await this.scheduleMaintenanceAlarm();
   }
 
   private applyQueueAdd(
@@ -585,7 +644,6 @@ export class Room extends DurableObject<Env> {
     };
   }
 
-  /** Add URL if missing, always select it as current (reset position). */
   private applySetUrl(url: string, now: number): void {
     if (!this.room) return;
     if (!isAllowedVideoUrl(url)) return;
@@ -630,7 +688,6 @@ export class Room extends DurableObject<Env> {
       isPlaying = false;
     } else if (queueIndex != null) {
       if (index === queueIndex) {
-        // Removed current → stay on same index (next item) or clamp
         queueIndex = Math.min(index, queue.length - 1);
         videoUrl = queue[queueIndex] ?? null;
         positionMs = 0;
@@ -735,10 +792,16 @@ export class Room extends DurableObject<Env> {
     return Math.max(n, this.sessions.size);
   }
 
-  /**
-   * Notify all clients, close sockets, wipe durable state.
-   * Used when host leaves (no host transfer).
-   */
+  /** True if the designated host still has a live hello'd socket. */
+  private isHostLive(): boolean {
+    const hostId = this.room?.state.hostSessionId;
+    if (!hostId) return false;
+    for (const session of this.sessions.values()) {
+      if (session.sessionId === hostId && session.helloDone) return true;
+    }
+    return false;
+  }
+
   private async dissolveRoom(
     reason: "host_left" | "empty" | "destroyed",
     message: string,
@@ -751,7 +814,6 @@ export class Room extends DurableObject<Env> {
     };
     const text = JSON.stringify(msg);
 
-    // Prefer in-memory sessions; also hit hibernation sockets
     const sockets = new Set<WebSocket>([
       ...this.sessions.keys(),
       ...this.ctx.getWebSockets(),
@@ -785,10 +847,6 @@ export class Room extends DurableObject<Env> {
     if (!this.room) return;
     this.room.lastActiveAtMs = Date.now();
     await this.persist();
-    // Active traffic with members — cancel any empty-room wipe
-    if (this.openConnectionCount() > 0) {
-      await this.ctx.storage.deleteAlarm();
-    }
   }
 
   private openConnectionCount(): number {
@@ -804,18 +862,43 @@ export class Room extends DurableObject<Env> {
     return EMPTY_ROOM_GRACE_MS;
   }
 
-  /** If nobody is connected, wipe room after a short grace period. */
-  private async scheduleEmptyRoomCleanup(): Promise<void> {
-    if (this.openConnectionCount() > 0) {
+  private hostStaleMs(): number {
+    const raw = this.env.HOST_STALE_MS;
+    if (raw) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return HOST_STALE_MS;
+  }
+
+  /**
+   * Single alarm path: empty-room wipe OR host-stale dissolve.
+   * Always schedules the sooner of the two relevant deadlines.
+   */
+  private async scheduleMaintenanceAlarm(): Promise<void> {
+    if (!this.room) {
+      if (this.openConnectionCount() === 0) {
+        await this.ctx.storage.deleteAll();
+      }
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    if (!this.room) {
-      await this.ctx.storage.deleteAll();
-      return;
+
+    const now = Date.now();
+    let deadline: number | null = null;
+
+    if (this.openConnectionCount() === 0) {
+      deadline = (this.room.lastActiveAtMs || now) + this.emptyGraceMs();
+    } else if (!this.isHostLive()) {
+      deadline =
+        (this.room.lastHostActivityAtMs || now) + this.hostStaleMs();
+    } else {
+      // Host connected — still schedule a far check in case heartbeats stop
+      // without a clean close (hibernation edge cases).
+      deadline =
+        (this.room.lastHostActivityAtMs || now) + this.hostStaleMs();
     }
-    this.room.lastActiveAtMs = Date.now();
-    await this.persist();
-    await this.ctx.storage.setAlarm(Date.now() + this.emptyGraceMs());
+
+    await this.ctx.storage.setAlarm(deadline);
   }
 }

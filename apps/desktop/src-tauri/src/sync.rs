@@ -88,6 +88,11 @@ pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
 
     let event_tx2 = event_tx.clone();
     tokio::spawn(async move {
+        let mut ping_tick = tokio::time::interval(Duration::from_secs(20));
+        ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // skip first immediate tick
+        ping_tick.tick().await;
+
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => {
@@ -96,6 +101,21 @@ pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
                         reason: "closed".into(),
                     });
                     break;
+                }
+                _ = ping_tick.tick() => {
+                    // WS-level ping + DO autoResponse text "ping" for hibernation keep-alive
+                    if write.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        let _ = event_tx2.send(SyncEvent::Disconnected {
+                            reason: "ping failed".into(),
+                        });
+                        break;
+                    }
+                    if write.send(Message::Text("ping".into())).await.is_err() {
+                        let _ = event_tx2.send(SyncEvent::Disconnected {
+                            reason: "ping failed".into(),
+                        });
+                        break;
+                    }
                 }
                 msg = out_rx.recv() => {
                     match msg {
@@ -118,6 +138,10 @@ pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
                 incoming = read.next() => {
                     match incoming {
                         Some(Ok(Message::Text(t))) => {
+                            // DO autoResponse "pong" — ignore
+                            if t == "pong" {
+                                continue;
+                            }
                             match serde_json::from_str::<ServerMessage>(&t) {
                                 Ok(sm) => {
                                     if let Some(ev) = map_server(sm) {
@@ -132,6 +156,7 @@ pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
                         Some(Ok(Message::Ping(p))) => {
                             let _ = write.send(Message::Pong(p)).await;
                         }
+                        Some(Ok(Message::Pong(_))) => {}
                         Some(Ok(Message::Close(_))) | None => {
                             let _ = event_tx2.send(SyncEvent::Disconnected {
                                 reason: "socket closed".into(),
@@ -150,9 +175,6 @@ pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
             }
         }
     });
-
-    // Keepalive ping task not strictly needed — DO may use autoResponse
-    let _ = Duration::from_secs(1);
 
     Ok(SyncHandle {
         out: out_tx,
