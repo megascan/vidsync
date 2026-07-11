@@ -26,9 +26,20 @@ pub struct ServeOptions {
 #[derive(Clone, Debug)]
 pub struct ServeInfo {
     pub lan_url: String,
-    pub wan_url: Option<String>,
+    /// Remote share URL using public IP (UPnP external port or local port).
+    pub public_url: Option<String>,
+    /// True when router actually mapped the port (inbound likely works).
+    pub upnp_mapped: bool,
+    pub public_ip: Option<String>,
     pub local_port: u16,
     pub file_name: String,
+}
+
+impl ServeInfo {
+    /// Prefer public URL for clipboard / “Copy URL”.
+    pub fn primary_url(&self) -> &str {
+        self.public_url.as_deref().unwrap_or(self.lan_url.as_str())
+    }
 }
 
 pub struct ServeSession {
@@ -69,29 +80,58 @@ impl ServeSession {
         info!("serving {}", file.display());
         let lan_url = format!("http://{lan_ip}:{local_port}/s/{token}");
 
-        let mut wan_url = None;
         let mut mapping: Option<upnp::Mapping> = None;
+        let mut upnp_mapped = false;
+        let mut external_port = local_port;
+        let mut public_ip_from_upnp = None;
 
         if opts.upnp {
             match upnp::map_tcp(lan_ip, local_port, opts.external_port, opts.lease_secs).await {
                 Ok(m) => {
-                    let url = format!("http://{}:{}/s/{token}", m.external_ip, m.external_port);
                     info!(
                         "UPnP {} → {}:{}",
                         m.gateway_addr, m.external_port, local_port
                     );
-                    wan_url = Some(url);
+                    external_port = m.external_port;
+                    public_ip_from_upnp = Some(m.external_ip);
+                    upnp_mapped = true;
                     mapping = Some(m);
                 }
                 Err(e) => {
-                    // Multi-line hint from upnp::search_error_hint
-                    warn!("UPnP failed (LAN still works):\n{e:#}");
+                    warn!("UPnP failed (will still discover public IP):\n{e:#}");
                 }
             }
         }
 
+        // Always try to learn public IP so Copy uses WAN, not only LAN
+        let public_ip = if let Some(ip) = public_ip_from_upnp {
+            if net::is_globally_routable_v4(ip) {
+                Some(ip)
+            } else {
+                warn!("UPnP external IP {ip} not globally routable; probing public IP…");
+                net::public_ipv4().await
+            }
+        } else {
+            net::public_ipv4().await
+        };
+
+        let public_url = public_ip.map(|ip| format!("http://{ip}:{external_port}/s/{token}"));
+        let public_ip_str = public_ip.map(|ip| ip.to_string());
+
+        if let Some(ref url) = public_url {
+            if upnp_mapped {
+                info!("public URL (UPnP mapped): {url}");
+            } else {
+                info!(
+                    "public URL (port-forward TCP {external_port} on router if friends are remote): {url}"
+                );
+            }
+        } else {
+            warn!("could not discover public IP — only LAN URL available");
+        }
+
         if opts.clipboard {
-            let copy = wan_url.as_ref().unwrap_or(&lan_url);
+            let copy = public_url.as_ref().unwrap_or(&lan_url);
             try_clipboard(copy);
         }
 
@@ -121,7 +161,9 @@ impl ServeSession {
             task: Some(task),
             info: ServeInfo {
                 lan_url,
-                wan_url,
+                public_url,
+                upnp_mapped,
+                public_ip: public_ip_str,
                 local_port,
                 file_name,
             },
@@ -143,7 +185,6 @@ impl Drop for ServeSession {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        // task may still run briefly; process exit cleans sockets
     }
 }
 

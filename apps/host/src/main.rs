@@ -126,17 +126,29 @@ fn main() -> Result<()> {
                 .await?;
 
                 println!();
+                if let Some(ip) = &session.info.public_ip {
+                    println!("  Public IP: {ip}");
+                }
+                if let Some(pub_url) = &session.info.public_url {
+                    if session.info.upnp_mapped {
+                        println!("  Public URL (UPnP open):");
+                    } else {
+                        println!("  Public URL (open TCP {} on router if remote friends):", session.info.local_port);
+                    }
+                    println!("    {pub_url}");
+                    println!();
+                } else {
+                    println!("  Public IP: unknown (offline / blocked HTTPS probe)");
+                    println!();
+                }
                 println!("  LAN URL (same network):");
                 println!("    {}", session.info.lan_url);
                 println!();
-                if let Some(wan) = &session.info.wan_url {
-                    println!("  WAN URL (UPnP):");
-                    println!("    {wan}");
-                    println!();
-                } else if !no_upnp {
-                    println!("  UPnP: unavailable — share LAN URL only.");
+                if !session.info.upnp_mapped && !no_upnp {
+                    println!("  UPnP: unavailable — public URL still shown for manual port-forward.");
                     println!();
                 }
+                println!("  Clipboard has: {}", session.info.primary_url());
                 println!("  Paste into VidSync queue → Stream with Unblock.");
                 println!("  Press Ctrl+C to stop.");
                 println!();

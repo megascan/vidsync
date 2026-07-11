@@ -79,7 +79,9 @@ struct HostApp {
     status: String,
     error: Option<String>,
     lan_url: Option<String>,
-    wan_url: Option<String>,
+    public_url: Option<String>,
+    upnp_mapped: bool,
+    public_ip: Option<String>,
     /// Flash “Copied!” after a successful copy
     copied_flash: Option<std::time::Instant>,
     session: Option<Box<ServeSession>>,
@@ -99,7 +101,9 @@ impl HostApp {
             status: "Pick a video file, then Start.".into(),
             error: None,
             lan_url: None,
-            wan_url: None,
+            public_url: None,
+            upnp_mapped: false,
+            public_ip: None,
             copied_flash: None,
             session: None,
             pending: None,
@@ -108,9 +112,9 @@ impl HostApp {
         }
     }
 
-    /// Prefer WAN (friends) else LAN.
+    /// Prefer public IP URL, else LAN.
     fn primary_url(&self) -> Option<&str> {
-        self.wan_url
+        self.public_url
             .as_deref()
             .or(self.lan_url.as_deref())
     }
@@ -127,15 +131,25 @@ impl HostApp {
             match rx.try_recv() {
                 Ok(Ok(session)) => {
                     self.lan_url = Some(session.info.lan_url.clone());
-                    self.wan_url = session.info.wan_url.clone();
+                    self.public_url = session.info.public_url.clone();
+                    self.upnp_mapped = session.info.upnp_mapped;
+                    self.public_ip = session.info.public_ip.clone();
+                    let via = if session.info.upnp_mapped {
+                        "UPnP open"
+                    } else if session.info.public_url.is_some() {
+                        "public IP — open port on router if remote"
+                    } else {
+                        "LAN only"
+                    };
                     self.status = format!(
-                        "Streaming {} on port {} — copy URL into VidSync queue",
+                        "Streaming {} on port {} ({via}) — public URL on clipboard",
                         session.info.file_name, session.info.local_port
                     );
                     self.session = Some(session);
                     self.busy = false;
                     self.pending = None;
                     self.error = None;
+                    self.copied_flash = Some(std::time::Instant::now());
                 }
                 Ok(Err(e)) => {
                     self.error = Some(e);
@@ -156,7 +170,9 @@ impl HostApp {
                 Ok(()) => {
                     self.session = None;
                     self.lan_url = None;
-                    self.wan_url = None;
+                    self.public_url = None;
+                    self.upnp_mapped = false;
+                    self.public_ip = None;
                     self.status = "Stopped. Pick a file and Start again.".into();
                     self.busy = false;
                     self.pending_stop = None;
@@ -248,9 +264,9 @@ impl HostApp {
         }
         self.busy = true;
         self.status = if self.use_upnp {
-            "Starting server + UPnP…".into()
+            "Starting server + UPnP + public IP…".into()
         } else {
-            "Starting server…".into()
+            "Starting server + public IP…".into()
         };
         self.error = None;
         self.pending = Some(reply_rx);
@@ -405,7 +421,7 @@ impl eframe::App for HostApp {
                             .fill(Color32::from_rgb(46, 160, 120))
                             .min_size(Vec2::new(100.0, 28.0)),
                     )
-                    .on_hover_text("Copy share URL (WAN if UPnP, else LAN)")
+                    .on_hover_text("Copy public IP URL (falls back to LAN)")
                     .clicked()
                 {
                     if let Some(url) = primary {
@@ -429,20 +445,33 @@ impl eframe::App for HostApp {
             ui.add_space(8.0);
 
             ui.label(RichText::new("Share URL").strong());
-            // Clone for borrow-checker (url_row needs &str; copy mutates self)
-            let wan = self.wan_url.clone();
+            if let Some(ip) = &self.public_ip {
+                ui.label(
+                    RichText::new(format!("Public IP: {ip}"))
+                        .monospace()
+                        .small()
+                        .color(Color32::from_rgb(160, 170, 190)),
+                );
+            }
+            let public = self.public_url.clone();
             let lan = self.lan_url.clone();
-            if let Some(url) = &wan {
-                if url_row(ui, "WAN (UPnP)", url) {
+            let upnp = self.upnp_mapped;
+            if let Some(url) = &public {
+                let label = if upnp {
+                    "Public (UPnP open)"
+                } else {
+                    "Public (forward port on router)"
+                };
+                if url_row(ui, label, url) {
                     self.copy_url(ctx, url);
                 }
             }
             if let Some(url) = &lan {
-                if url_row(ui, "LAN", url) {
+                if url_row(ui, "LAN (same Wi‑Fi)", url) {
                     self.copy_url(ctx, url);
                 }
             }
-            if wan.is_none() && lan.is_none() {
+            if public.is_none() && lan.is_none() {
                 ui.label(
                     RichText::new("URLs appear here after Start.")
                         .color(Color32::from_rgb(140, 145, 160))
