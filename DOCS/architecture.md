@@ -39,5 +39,7 @@ Local: `WEB_ORIGIN=http://localhost:4321` in `.dev.vars`.
 - DO: `env.ROOMS.getByName(code)`
 
 ## Static room routes
-Pure static cannot prerender infinite codes. Deploy rewrite:
-`/r/*` → `/room/index.html` (200). Island parses code from pathname.
+Pure static cannot prerender infinite codes. `apps/web/src/asset-worker.ts`:
+- `run_worker_first: ["/r/*"]`
+- Internal `ASSETS.fetch("/room/")` — **no browser 3xx** (redirects drop the code)
+- Client parses code from pathname `/r/XXXXXXXX`

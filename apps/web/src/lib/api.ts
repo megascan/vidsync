@@ -18,14 +18,22 @@ export async function createRoom(opts: {
   code: string;
   wsUrl: string;
 }> {
-  const res = await fetch(`${apiBase()}/rooms`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      turnstileToken: opts.turnstileToken,
-      ...(opts.videoUrl ? { videoUrl: opts.videoUrl } : {}),
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        turnstileToken: opts.turnstileToken,
+        ...(opts.videoUrl ? { videoUrl: opts.videoUrl } : {}),
+      }),
+    });
+  } catch {
+    throw new Error(
+      `Cannot reach API at ${apiBase()}. Check network / CORS / API URL.`,
+    );
+  }
+
   if (!res.ok) {
     const err = (await res.json().catch(() => null)) as {
       message?: string;
@@ -33,5 +41,10 @@ export async function createRoom(opts: {
     } | null;
     throw new Error(err?.message ?? err?.error ?? `Create failed (${res.status})`);
   }
-  return (await res.json()) as { code: string; wsUrl: string };
+
+  const data = (await res.json()) as { code?: string; wsUrl?: string };
+  if (!data.code) {
+    throw new Error("Create succeeded but response had no room code");
+  }
+  return { code: data.code, wsUrl: data.wsUrl ?? "" };
 }

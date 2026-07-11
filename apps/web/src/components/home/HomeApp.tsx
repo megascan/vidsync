@@ -24,7 +24,11 @@ export default function HomeApp() {
     try {
       // Empty room = sync group; host queues streams inside the room
       const { code } = await createRoom({ turnstileToken });
-      window.location.href = `/r/${code}`;
+      if (!code || !isValidRoomCode(code)) {
+        throw new Error("Server returned an invalid room code");
+      }
+      // Pretty path; asset worker rewrites to room shell without dropping code
+      window.location.assign(`/r/${normalizeRoomCode(code)}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create room");
       setTurnstileToken(null);
@@ -41,7 +45,7 @@ export default function HomeApp() {
       setError("Enter a valid 8-character room code.");
       return;
     }
-    window.location.href = `/r/${code}`;
+    window.location.assign(`/r/${code}`);
   }
 
   return (
