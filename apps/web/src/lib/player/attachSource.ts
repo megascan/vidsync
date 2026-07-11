@@ -3,6 +3,7 @@ import {
   base64ToBlob,
   isUnblockInstalled,
   unblockFetch,
+  withUnblockCacheBust,
 } from "../unblock/bridge";
 
 export type SourceHandle = {
@@ -16,7 +17,6 @@ type HlsLike = {
   startLoad: () => void;
   recoverMediaError: () => void;
   on: (event: string, cb: (event: unknown, data: HlsErrorData) => void) => void;
-  config: { loader: unknown };
 };
 
 type HlsErrorData = {
@@ -64,24 +64,14 @@ type HlsLoaderCallbacks = {
     networkDetails: unknown,
     stats: unknown,
   ) => void;
-  onTimeout?: (
-    stats: unknown,
-    context: HlsLoaderContext,
-    networkDetails: unknown,
-  ) => void;
-  onProgress?: (
-    stats: unknown,
-    context: HlsLoaderContext,
-    data: unknown,
-    networkDetails: unknown,
-  ) => void;
 };
 
 export type AttachSourceOptions = {
-  /** Prefer extension fetch when installed (HLS loader; progressive on error). */
   preferUnblock?: boolean;
-  /** Always load via extension when installed (user clicked "Open with Unblock"). */
+  /** User clicked Open with Unblock — CORS shim + extension loaders / blob. */
   forceUnblock?: boolean;
+  onStatus?: (message: string) => void;
+  onSettled?: () => void;
 };
 
 function looksLikeHls(url: string): boolean {
@@ -116,11 +106,6 @@ function makeUnblockLoader(
       loaderConfig: unknown,
       callbacks: HlsLoaderCallbacks,
     ) => {
-      if (!isUnblockInstalled()) {
-        base.load(context, loaderConfig, callbacks);
-        return;
-      }
-
       const headers: Record<string, string> = {};
       if (
         context.rangeEnd !== undefined &&
@@ -144,15 +129,8 @@ function makeUnblockLoader(
       void unblockFetch(context.url, { headers })
         .then((res) => {
           if (!res.ok || !res.bodyBase64) {
-            callbacks.onError(
-              {
-                code: res.status ?? 0,
-                text: res.ok ? "empty_body" : (res.message ?? res.error),
-              },
-              context,
-              null,
-              stats,
-            );
+            // Fall back to normal loader (DNR may have fixed CORS)
+            base.load(context, loaderConfig, callbacks);
             return;
           }
           const raw = base64ToArrayBuffer(res.bodyBase64);
@@ -179,16 +157,8 @@ function makeUnblockLoader(
             null,
           );
         })
-        .catch((err: unknown) => {
-          callbacks.onError(
-            {
-              code: 0,
-              text: err instanceof Error ? err.message : "unblock_fetch_failed",
-            },
-            context,
-            null,
-            stats,
-          );
+        .catch(() => {
+          base.load(context, loaderConfig, callbacks);
         });
     };
   } as unknown as new (config: unknown) => HlsLoaderInstance;
@@ -198,20 +168,24 @@ async function attachProgressiveUnblock(
   video: HTMLVideoElement,
   url: string,
   onError: (message: string) => void,
+  onStatus?: (message: string) => void,
 ): Promise<() => void> {
+  onStatus?.("Fetching media via Unblock…");
   const res = await unblockFetch(url);
   if (!res.ok || !res.bodyBase64) {
-    onError(
+    const msg =
       res.ok
         ? "Empty media body via Unblock"
-        : (res.message ?? res.error ?? "Unblock fetch failed"),
-    );
+        : (res.message ?? res.error ?? "Unblock fetch failed");
+    onError(msg);
     return () => undefined;
   }
   const mime = guessMime(url, res.headers);
   const blob = base64ToBlob(res.bodyBase64, mime);
   const objectUrl = URL.createObjectURL(blob);
   video.src = objectUrl;
+  video.load();
+  onStatus?.("Loaded via Unblock");
   return () => {
     URL.revokeObjectURL(objectUrl);
   };
@@ -227,30 +201,36 @@ export function attachVideoSource(
   let hls: HlsLike | null = null;
   let revokeBlob: (() => void) | null = null;
   const preferUnblock = options?.preferUnblock !== false;
-  const forceUnblock = Boolean(options?.forceUnblock) && isUnblockInstalled();
-  const useUnblockLoader =
-    forceUnblock || (preferUnblock && isUnblockInstalled());
+  const forceUnblock = Boolean(options?.forceUnblock);
+  const onStatus = options?.onStatus;
+  const onSettled = options?.onSettled;
+
+  const settled = () => {
+    if (!destroyed) onSettled?.();
+  };
 
   const onVideoError = () => {
     const err = video.error;
     const code = err?.code;
-    // Try extension progressive fallback once on network/src errors
     if (
       preferUnblock &&
-      isUnblockInstalled() &&
       !looksLikeHls(url) &&
       !revokeBlob &&
       !forceUnblock &&
       (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ||
         code === MediaError.MEDIA_ERR_NETWORK)
     ) {
-      void attachProgressiveUnblock(video, url, onError).then((revoke) => {
-        if (destroyed) {
-          revoke();
-          return;
-        }
-        revokeBlob = revoke;
-      });
+      void attachProgressiveUnblock(video, url, onError, onStatus).then(
+        (revoke) => {
+          if (destroyed) {
+            revoke();
+            settled();
+            return;
+          }
+          revokeBlob = revoke;
+          settled();
+        },
+      );
       return;
     }
     if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
@@ -264,6 +244,7 @@ export function attachVideoSource(
     } else {
       onError("Failed to load media.");
     }
+    settled();
   };
 
   video.addEventListener("error", onVideoError);
@@ -273,27 +254,38 @@ export function attachVideoSource(
       video.canPlayType("application/vnd.apple.mpegurl") !== "" ||
       video.canPlayType("application/x-mpegURL") !== "";
 
+    const playUrl = forceUnblock ? withUnblockCacheBust(url) : url;
+    onStatus?.(
+      forceUnblock
+        ? "Loading HLS via Unblock (CORS shim + loader)…"
+        : "Loading HLS…",
+    );
+
     void import("hls.js").then((mod) => {
-      if (destroyed) return;
+      if (destroyed) {
+        settled();
+        return;
+      }
       const Hls = (mod as unknown as HlsModule).default;
       if (Hls.isSupported()) {
         const config: Record<string, unknown> = {
           enableWorker: true,
           lowLatencyMode: false,
         };
-        if (useUnblockLoader) {
+        // Always use extension loader when force, or when installed + prefer
+        if (forceUnblock || (preferUnblock && isUnblockInstalled())) {
           config.loader = makeUnblockLoader(Hls.DefaultConfig.loader);
         }
         const instance = new Hls(config) as HlsLike;
         hls = instance;
-        instance.loadSource(url);
+        instance.loadSource(playUrl);
         instance.attachMedia(video);
         instance.on(Hls.Events.ERROR, (_e, data) => {
           if (!data.fatal) return;
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
             onError(
-              isUnblockInstalled()
-                ? "HLS network error (even with Unblock). Check URL."
+              forceUnblock || isUnblockInstalled()
+                ? "HLS network error even with Unblock. Check the URL is reachable."
                 : "HLS network error — install VidSync Unblock or fix CORS.",
             );
             instance.startLoad();
@@ -303,25 +295,79 @@ export function attachVideoSource(
             onError("Fatal HLS error.");
             instance.destroy();
           }
+          settled();
         });
+        // HLS may not fire error — settle after short delay for UI
+        window.setTimeout(settled, 800);
       } else if (canNative && !forceUnblock) {
-        video.src = url;
-      } else if (!Hls.isSupported()) {
+        video.src = playUrl;
+        settled();
+      } else {
         onError("HLS not supported in this browser.");
+        settled();
       }
     });
   } else if (forceUnblock) {
-    void attachProgressiveUnblock(video, url, onError).then((revoke) => {
-      if (destroyed) {
-        revoke();
+    // 1) Cache-busted direct (DNR CORS shim helps <video> + seeking)
+    // 2) If that fails, blob via extension (≤80MB)
+    const bust = withUnblockCacheBust(url);
+    onStatus?.("Opening via Unblock CORS shim…");
+    video.src = bust;
+    video.load();
+
+    const fallbackTimer = window.setTimeout(() => {
+      if (destroyed || revokeBlob) {
+        settled();
         return;
       }
-      revokeBlob = revoke;
-    });
+      // If still no data after a moment, try full extension fetch
+      if (video.readyState < 2 && (video.error || video.networkState === 3)) {
+        onStatus?.("Direct load weak — fetching full file via Unblock…");
+        void attachProgressiveUnblock(video, url, onError, onStatus).then(
+          (revoke) => {
+            if (destroyed) {
+              revoke();
+              settled();
+              return;
+            }
+            revokeBlob = revoke;
+            settled();
+          },
+        );
+      } else {
+        settled();
+      }
+    }, 1500);
+
+    // Also listen once for canplay
+    const onCanPlay = () => {
+      window.clearTimeout(fallbackTimer);
+      onStatus?.("Playing (Unblock CORS)");
+      settled();
+    };
+    video.addEventListener("canplay", onCanPlay, { once: true });
+
+    return {
+      destroy: () => {
+        destroyed = true;
+        window.clearTimeout(fallbackTimer);
+        video.removeEventListener("canplay", onCanPlay);
+        video.removeEventListener("error", onVideoError);
+        if (hls) {
+          hls.destroy();
+          hls = null;
+        }
+        if (revokeBlob) {
+          revokeBlob();
+          revokeBlob = null;
+        }
+        video.removeAttribute("src");
+        video.load();
+      },
+    };
   } else {
-    // Progressive: try direct first (often works without CORS on <video>).
-    // On error, onVideoError falls back to Unblock blob path (≤80MB).
     video.src = url;
+    settled();
   }
 
   return {

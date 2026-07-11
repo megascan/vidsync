@@ -1,8 +1,6 @@
 /**
  * Content script — bridges VidSync page ↔ extension background.
- *
- * Note: Chrome will NOT auto-open the toolbar popup when you land on the site
- * (browser security). Interaction is: this bridge + in-page UI on VidSync.
+ * Chrome will NOT auto-open the toolbar popup; site UI is the surface.
  */
 
 const CHANNEL = "vidsync-unblock";
@@ -21,11 +19,10 @@ function markDom() {
     el.dataset.vidsyncUnblock = "1";
     el.dataset.vidsyncUnblockVersion = VERSION;
   } catch {
-    // ignore
+    /* ignore */
   }
 }
 
-/** MAIN-world flag so the page always sees us (dataset can race with frameworks). */
 function injectMainWorldFlag() {
   try {
     const script = document.createElement("script");
@@ -47,7 +44,7 @@ function injectMainWorldFlag() {
     root.appendChild(script);
     script.remove();
   } catch {
-    // ignore
+    /* ignore */
   }
 }
 
@@ -61,9 +58,8 @@ function announce() {
       }),
     );
   } catch {
-    // ignore
+    /* ignore */
   }
-  // Tell the page via postMessage too (some listeners only use that)
   try {
     window.postMessage(
       {
@@ -76,15 +72,12 @@ function announce() {
       window.location.origin,
     );
   } catch {
-    // ignore
+    /* ignore */
   }
 }
 
 announce();
-// SPA / late hydration — re-announce a few times
-[0, 100, 500, 1500, 3000].forEach((ms) => {
-  setTimeout(announce, ms);
-});
+[0, 100, 500, 1500, 3000].forEach((ms) => setTimeout(announce, ms));
 
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
@@ -92,8 +85,6 @@ window.addEventListener("message", (event) => {
 
   const data = event.data;
   if (!data || data.channel !== CHANNEL) return;
-
-  // Ignore our own events/responses
   if (data.direction === "response" || data.direction === "event") return;
   if (data.direction !== "request") return;
   if (typeof data.id !== "string" || typeof data.type !== "string") return;
@@ -119,16 +110,30 @@ async function handlePageRequest(data) {
 
   try {
     if (data.type === "ping") {
-      // Prefer local answer so we still work if SW is asleep
       try {
         const res = await chrome.runtime.sendMessage({ type: "ping" });
         reply({
           ok: true,
           version: res?.version ?? VERSION,
+          cors: Boolean(res?.cors),
           bridge: "content+background",
         });
       } catch {
         reply({ ok: true, version: VERSION, bridge: "content-only" });
+      }
+      return;
+    }
+
+    if (data.type === "enable_cors") {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: "enable_cors" });
+        reply(res ?? { ok: false, error: "no_response" });
+      } catch (e) {
+        reply({
+          ok: false,
+          error: "enable_cors_failed",
+          message: e instanceof Error ? e.message : "enable failed",
+        });
       }
       return;
     }
@@ -156,9 +161,8 @@ async function handlePageRequest(data) {
   }
 }
 
-// Badge the toolbar icon while on VidSync (popup still user-click only)
 try {
   chrome.runtime.sendMessage({ type: "tab_active", active: true }).catch(() => {});
 } catch {
-  // ignore
+  /* ignore */
 }

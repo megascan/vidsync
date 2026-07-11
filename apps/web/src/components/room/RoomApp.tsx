@@ -19,7 +19,11 @@ import {
 import { parseRoomCodeFromLocation } from "../../lib/roomCode";
 import { applyDrift, SyncClient } from "../../lib/sync/client";
 import { useRoomStore } from "../../lib/store/roomStore";
-import { onUnblockReady, pingUnblock } from "../../lib/unblock/bridge";
+import {
+  enableUnblockCors,
+  onUnblockReady,
+  pingUnblock,
+} from "../../lib/unblock/bridge";
 import UnblockStatus from "./UnblockStatus";
 
 function formatTime(ms: number): string {
@@ -94,6 +98,7 @@ export default function RoomApp() {
   const [mediaReload, setMediaReload] = useState(0);
   const [forceUnblock, setForceUnblock] = useState(false);
   const [openingUnblock, setOpeningUnblock] = useState(false);
+  const [unblockStatus, setUnblockStatus] = useState<string | null>(null);
 
   useEffect(() => {
     const resolved = parseRoomCodeFromLocation(
@@ -196,17 +201,27 @@ export default function RoomApp() {
     sourceRef.current?.destroy();
     sourceRef.current = null;
     setMediaError(null);
+    if (!forceUnblock) setUnblockStatus(null);
 
-    if (!url) return;
-
-    sourceRef.current = attachVideoSource(video, url, (msg) => {
-      setMediaError(msg);
+    if (!url) {
       setOpeningUnblock(false);
-    }, {
-      preferUnblock: true,
-      forceUnblock,
-    });
-    setOpeningUnblock(false);
+      return;
+    }
+
+    sourceRef.current = attachVideoSource(
+      video,
+      url,
+      (msg) => {
+        setMediaError(msg);
+        setOpeningUnblock(false);
+      },
+      {
+        preferUnblock: true,
+        forceUnblock,
+        onStatus: (msg) => setUnblockStatus(msg),
+        onSettled: () => setOpeningUnblock(false),
+      },
+    );
     return () => {
       sourceRef.current?.destroy();
       sourceRef.current = null;
@@ -364,21 +379,41 @@ export default function RoomApp() {
 
   /** Reload current queue item through the extension (explicit user action). */
   const onOpenWithUnblock = () => {
-    if (!playback?.videoUrl) {
-      setLastError("Nothing in the queue yet");
-      return;
-    }
-    if (!unblockOn) {
-      setLastError(
-        "Install VidSync Unblock, reload this tab, then try again.",
-      );
-      return;
-    }
-    setMediaError(null);
-    setLastError(null);
-    setOpeningUnblock(true);
-    setForceUnblock(true);
-    setMediaReload((n) => n + 1);
+    void (async () => {
+      if (!playback?.videoUrl) {
+        setLastError("Nothing in the queue yet");
+        return;
+      }
+
+      setOpeningUnblock(true);
+      setMediaError(null);
+      setLastError(null);
+      setUnblockStatus("Talking to extension…");
+
+      const ping = await pingUnblock();
+      if (!ping.ok) {
+        setOpeningUnblock(false);
+        setUnblockStatus(null);
+        setLastError(
+          "VidSync Unblock not responding. Load unpacked extension, enable it, hard-refresh this tab.",
+        );
+        setUnblockOn(false);
+        return;
+      }
+      setUnblockOn(true);
+
+      const cors = await enableUnblockCors();
+      if (!cors.ok) {
+        setUnblockStatus(
+          `CORS shim warn: ${cors.message ?? "failed"} — still trying load…`,
+        );
+      } else {
+        setUnblockStatus("CORS shim on — reloading stream…");
+      }
+
+      setForceUnblock(true);
+      setMediaReload((n) => n + 1);
+    })();
   };
 
   /** Open raw media URL in a new tab (browser / external player). */
@@ -614,6 +649,11 @@ export default function RoomApp() {
                 ) : null}
               </div>
 
+              {unblockStatus ? (
+                <p className="text-xs text-[var(--color-accent)]" role="status">
+                  {unblockStatus}
+                </p>
+              ) : null}
               {hasVideo ? (
                 <p className="truncate font-mono text-xs text-[var(--color-muted)]">
                   Now: {playback?.videoUrl}

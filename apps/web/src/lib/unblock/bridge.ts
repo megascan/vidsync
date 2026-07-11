@@ -154,6 +154,31 @@ export async function pingUnblock(): Promise<{
   }
 }
 
+/** Ensure DNR CORS shim is registered (session rules). */
+export async function enableUnblockCors(): Promise<{
+  ok: boolean;
+  message?: string;
+}> {
+  if (typeof window === "undefined") return { ok: false, message: "no window" };
+  ensureListener();
+  try {
+    const res = (await pageRequest("enable_cors", undefined, 5000)) as {
+      ok?: boolean;
+      message?: string;
+      error?: string;
+    };
+    return {
+      ok: Boolean(res?.ok),
+      message: res?.message ?? res?.error,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : "enable_cors timeout",
+    };
+  }
+}
+
 export async function unblockFetch(
   url: string,
   opts?: {
@@ -181,6 +206,18 @@ export async function unblockFetch(
       error: "bridge_timeout",
       message: e instanceof Error ? e.message : "bridge timeout",
     };
+  }
+}
+
+/** Cache-bust so the player re-requests after DNR rules apply. */
+export function withUnblockCacheBust(url: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.set("_vu", String(Date.now()));
+    return u.toString();
+  } catch {
+    const join = url.includes("?") ? "&" : "?";
+    return `${url}${join}_vu=${Date.now()}`;
   }
 }
 

@@ -5,8 +5,10 @@ Optional Chromium extension. Lets [VidSync](https://vidsync.ratt.ing) fetch queu
 ## What it does
 
 - Runs **only** on `https://vidsync.ratt.ing` and local dev (`localhost:4321`)
-- Page asks content script → background `fetch` (no CORS)
-- Used for HLS segments / stubborn progressive streams
+- **CORS shim** (`declarativeNetRequest`): adds `Access-Control-*` on media/XHR
+  responses when the request was initiated by VidSync — so `<video>` / hls.js work
+- **Fetch bridge**: optional full-body fetch for small progressive files / segments
+- Room button **Open with Unblock** enables shim + reloads the current stream
 - **Does not** upload media to VidSync or Cloudflare
 - **Does not** fix LAN reachability (remote friends still need a public URL)
 
