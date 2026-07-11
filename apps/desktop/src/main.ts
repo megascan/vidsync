@@ -213,13 +213,12 @@ function bufferedAheadFrom(t: number): number {
   return 0;
 }
 
-function timeIsBuffered(t: number): boolean {
-  return bufferedAheadFrom(t) > 0.25;
-}
-
 /**
- * Follower sync: buffer first, then play. Do NOT thrash seeks to host "live"
- * edge on slow WAN — that is the remote flicker (local looks fine: instant buffer).
+ * Follower sync: on host scrub / big drift → HTTP Range seek to that time,
+ * then buffer *from there*. Soft path only rate-tweaks when already near.
+ *
+ * Old bug: clamped seeks into already-buffered ranges so mid-file scrub
+ * downloaded 0→click instead of Range-jumping to the click.
  */
 async function syncFollowerPlayback(
   state: PlaybackState,
@@ -232,52 +231,28 @@ async function syncFollowerPlayback(
 
   const now = video.currentTime || 0;
   const drift = targetSec - now; // + = behind host
-  const ahead = bufferedAheadFrom(now);
-
-  // Not enough media yet — wait; never force play into an empty buffer
-  if (ahead < FOLLOWER_MIN_BUFFER_SEC * 0.5 && video.readyState < 3) {
-    followerBuffering = true;
-    try {
-      video.pause();
-    } catch {
-      /* */
-    }
-    if (prepareStatus === "" || prepareStatus.startsWith("Buffering")) {
-      prepareStatus = "Buffering stream…";
-      softPaintRoom();
-    }
-    return;
-  }
-
-  // Hard seek only when far off AND the target (or near it) can be served
   const far = Math.abs(drift) >= FOLLOWER_HARD_DRIFT_SEC;
+
+  // Host scrub / join mid-file: always jump to target. Browser issues Range.
+  // Do this BEFORE the "wait for buffer" early-out or we never leave 0→N crawl.
   if (needLoad || far) {
-    const seekTo = targetSec;
-    // Prefer seeking into already-buffered ranges to avoid Range thrash
-    let t = seekTo;
-    if (!timeIsBuffered(seekTo)) {
-      // Jump to latest buffered end behind host if we have any buffer
+    if (Math.abs(now - targetSec) > 0.75) {
       try {
-        const b = video.buffered;
-        if (b.length > 0) {
-          const end = b.end(b.length - 1);
-          // Stay at least 1s behind buffer end so we keep ahead-room
-          t = Math.max(0, Math.min(seekTo, end - 1));
-        }
+        if (video.playbackRate !== 1) video.playbackRate = 1;
       } catch {
-        t = seekTo;
+        /* */
       }
-    }
-    if (Math.abs((video.currentTime || 0) - t) > 0.5) {
-      await safeSeek(t, gen);
+      await safeSeek(targetSec, gen);
       if (gen !== applyGen) return;
     }
-  } else if (Math.abs(drift) >= FOLLOWER_SOFT_DRIFT_SEC && ahead > 2) {
-    // Gentle rate catch-up instead of seek
-    try {
-      video.playbackRate = drift > 0 ? 1.06 : 0.94;
-    } catch {
-      /* */
+  } else if (Math.abs(drift) >= FOLLOWER_SOFT_DRIFT_SEC) {
+    const aheadSoft = bufferedAheadFrom(video.currentTime || 0);
+    if (aheadSoft > 2) {
+      try {
+        video.playbackRate = drift > 0 ? 1.06 : 0.94;
+      } catch {
+        /* */
+      }
     }
   } else {
     try {
@@ -287,10 +262,36 @@ async function syncFollowerPlayback(
     }
   }
 
-  const aheadNow = bufferedAheadFrom(video.currentTime || 0);
+  const cur = video.currentTime || 0;
+  const ahead = bufferedAheadFrom(cur);
+
+  // Not enough media at *current* playhead — wait (after seek this is the new spot)
+  if (ahead < FOLLOWER_MIN_BUFFER_SEC * 0.5 && video.readyState < 3) {
+    followerBuffering = true;
+    try {
+      video.pause();
+    } catch {
+      /* */
+    }
+    if (
+      prepareStatus === "" ||
+      prepareStatus.startsWith("Buffering") ||
+      prepareStatus.startsWith("Seeking")
+    ) {
+      prepareStatus = far || needLoad ? "Seeking… buffering" : "Buffering stream…";
+      softPaintRoom();
+    }
+    return;
+  }
+
   if (!hostPlaying) {
     followerBuffering = false;
-    prepareStatus = prepareStatus.startsWith("Buffering") ? "" : prepareStatus;
+    if (
+      prepareStatus.startsWith("Buffering") ||
+      prepareStatus.startsWith("Seeking")
+    ) {
+      prepareStatus = "";
+    }
     if (!video.paused) {
       try {
         video.pause();
@@ -302,11 +303,11 @@ async function syncFollowerPlayback(
   }
 
   // Host playing: only play when we have a comfortable buffer ahead
-  if (aheadNow < FOLLOWER_MIN_BUFFER_SEC) {
+  if (ahead < FOLLOWER_MIN_BUFFER_SEC) {
     followerBuffering = true;
-    prepareStatus = `Buffering… ${aheadNow.toFixed(1)}s`;
+    prepareStatus = `Buffering… ${ahead.toFixed(1)}s`;
     softPaintRoom();
-    if (!video.paused && aheadNow < 1) {
+    if (!video.paused && ahead < 1) {
       try {
         video.pause();
       } catch {
@@ -314,14 +315,17 @@ async function syncFollowerPlayback(
       }
     }
     // If we have a little buffer, keep playing to avoid stop-start thrash
-    if (aheadNow >= 1.5 && video.paused) {
+    if (ahead >= 1.5 && video.paused) {
       await safePlay();
     }
     return;
   }
 
   followerBuffering = false;
-  if (prepareStatus.startsWith("Buffering")) {
+  if (
+    prepareStatus.startsWith("Buffering") ||
+    prepareStatus.startsWith("Seeking")
+  ) {
     prepareStatus = "";
     softPaintRoom();
   }
@@ -569,23 +573,25 @@ async function loadVideoSrc(url: string): Promise<void> {
   });
 }
 
-/** Seek only when WebKit is ready — seeking too early crashes some Linux builds. */
+/**
+ * Seek only when WebKit is ready — seeking too early crashes some Linux builds.
+ * Cap to duration when known. Do NOT clamp to current `seekable` (often just the
+ * already-downloaded slice) — that blocks mid-file scrub / HTTP Range jumps.
+ */
 async function safeSeek(targetSec: number, gen: number): Promise<void> {
   if (!Number.isFinite(targetSec) || targetSec < 0) return;
   if (video.readyState < 1) return; // HAVE_NOTHING
-  if (Math.abs((video.currentTime || 0) - targetSec) <= 0.4) return;
 
-  // Prefer a time within seekable ranges when available
-  let t = targetSec;
+  let t = Math.max(0, targetSec);
   try {
-    if (video.seekable && video.seekable.length > 0) {
-      const start = video.seekable.start(0);
-      const end = video.seekable.end(video.seekable.length - 1);
-      t = Math.min(Math.max(targetSec, start), end);
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      t = Math.min(t, Math.max(0, video.duration - 0.05));
     }
   } catch {
-    /* seekable not ready */
+    /* duration not ready */
   }
+
+  if (Math.abs((video.currentTime || 0) - t) <= 0.4) return;
 
   await new Promise<void>((resolve) => {
     let settled = false;
@@ -598,7 +604,8 @@ async function safeSeek(targetSec: number, gen: number): Promise<void> {
     };
     video.addEventListener("seeked", done, { once: true });
     video.addEventListener("error", done, { once: true });
-    window.setTimeout(done, 2500);
+    // Range seeks over WAN can take longer than a local jump
+    window.setTimeout(done, 8000);
     try {
       video.currentTime = t;
     } catch {
