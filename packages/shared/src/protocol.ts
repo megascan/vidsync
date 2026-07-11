@@ -9,17 +9,19 @@ export const MAX_CHAT_LENGTH = 280;
 /** Host should emit heartbeat this often while in a room (playing or not). */
 export const HOST_HEARTBEAT_MS = 5000;
 /**
- * After the last client disconnects, wait this long before wiping.
- * Short blips should not kill the room.
+ * After the last socket disconnects, wait this long before wiping storage.
+ * Long on purpose — DO blips + reconnects should never race the wipe.
  */
-export const EMPTY_ROOM_GRACE_MS = 30_000;
+export const EMPTY_ROOM_GRACE_MS = 10 * 60_000;
 /** @deprecated use EMPTY_ROOM_GRACE_MS */
 export const ROOM_IDLE_TTL_MS = EMPTY_ROOM_GRACE_MS;
 /**
- * No host application traffic (heartbeat/play/pause/…) for this long → dissolve.
- * Host WS close alone is NOT enough; transient disconnects are common.
+ * Host socket gone this long with peers still present → promote oldest peer
+ * as host. Room is NOT dissolved while anyone is connected.
  */
-export const HOST_STALE_MS = 45_000;
+export const HOST_RECLAIM_MS = 60_000;
+/** @deprecated host silence no longer dissolves rooms with live peers */
+export const HOST_STALE_MS = HOST_RECLAIM_MS;
 /** Min ms between chat messages per session (stateless flood control). */
 export const CHAT_COOLDOWN_MS = 400;
 

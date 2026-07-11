@@ -5,12 +5,12 @@
 - Optional `videoUrl` on create seeds the queue (home UI creates empty)
 - Turnstile on create only
 - Code is public share secret (treat like unlisted link)
-- **Host liveness = heartbeats**, not WS close alone. Socket blips do not kill the room.
-- Room dissolves only after **~45s** (`HOST_STALE_MS`) with **no host packets**.
-- Host can rejoin: if previous host session is dead, next `hello` claims host.
-- Empty room (zero sockets): wipe after **~30s** grace.
-- Host = first joiner, re-claim after soft-disconnect, or `transfer_host`.
-- Presence: sessionId + nickname (localStorage), no accounts
+- **Room stays alive while any socket is open** — never dissolve for host drop alone.
+- Host socket gone: wait **~60s** (`HOST_RECLAIM_MS`) for reconnect, then **promote oldest peer**.
+- Host reconnect (hello while host dead): reclaims host immediately.
+- Empty room (zero sockets): wipe after **~10 min** (`EMPTY_ROOM_GRACE_MS`).
+- Clients auto-reconnect aggressively (desktop + web).
+- Presence: sessionId + nickname + optional platform badge.
 
 ## Queue (host only)
 - `queue_add` / `queue_remove` / `queue_play` / `queue_clear`

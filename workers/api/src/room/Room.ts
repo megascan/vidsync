@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   CHAT_COOLDOWN_MS,
   EMPTY_ROOM_GRACE_MS,
-  HOST_STALE_MS,
+  HOST_RECLAIM_MS,
   MAX_MEMBERS,
   MAX_QUEUE_LENGTH,
   clientMessageSchema,
@@ -31,6 +31,8 @@ type StoredRoom = {
   lastActiveAtMs: number;
   /** Last host application message (heartbeat, play, pause, …). */
   lastHostActivityAtMs: number;
+  /** When designated host socket disappeared (null while host live). */
+  hostGoneAtMs: number | null;
   state: PlaybackState;
 };
 
@@ -61,6 +63,9 @@ export class Room extends DurableObject<Env> {
         if (!stored.lastHostActivityAtMs) {
           stored.lastHostActivityAtMs =
             stored.lastActiveAtMs || stored.createdAtMs || Date.now();
+        }
+        if (stored.hostGoneAtMs === undefined) {
+          stored.hostGoneAtMs = null;
         }
         this.room = stored;
       } else {
@@ -119,6 +124,7 @@ export class Room extends DurableObject<Env> {
         createdAtMs: now,
         lastActiveAtMs: now,
         lastHostActivityAtMs: now,
+        hostGoneAtMs: null,
         state,
       };
       await this.persist();
@@ -230,7 +236,7 @@ export class Room extends DurableObject<Env> {
     code: number,
     reason: string,
   ): Promise<void> {
-    const session = this.sessions.get(ws);
+    const session = this.sessions.get(ws) ?? this.attachmentOf(ws);
     this.sessions.delete(ws);
     try {
       ws.close(code, reason);
@@ -238,39 +244,43 @@ export class Room extends DurableObject<Env> {
       // already closed
     }
 
-    if (!this.room || !session) {
+    if (!this.room) {
       await this.scheduleMaintenanceAlarm();
       return;
     }
 
-    const wasHost = this.room.state.hostSessionId === session.sessionId;
+    const wasHost =
+      !!session && this.room.state.hostSessionId === session.sessionId;
 
-    // Host socket drop is NOT instant room death — heartbeat/activity decides.
-    // Peers stay; host can rejoin or room dissolves after HOST_STALE_MS quiet.
+    // NEVER dissolve while peers may still be connected. Mark host gone for
+    // reclaim/promote; empty wipe only when zero sockets after long grace.
     if (wasHost) {
+      this.room.hostGoneAtMs = Date.now();
+      await this.persist();
       this.broadcastMembers();
-      await this.scheduleMaintenanceAlarm();
-      return;
-    }
-
-    if (this.openConnectionCount() > 0) {
+    } else if (session) {
       this.broadcastMembers();
-      await this.scheduleMaintenanceAlarm();
-      return;
     }
 
     await this.scheduleMaintenanceAlarm();
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
+    // Same path as close — DO often fires error then close
+    const session = this.sessions.get(ws) ?? this.attachmentOf(ws);
     this.sessions.delete(ws);
+    if (this.room && session?.sessionId === this.room.state.hostSessionId) {
+      this.room.hostGoneAtMs = Date.now();
+      await this.persist();
+    }
     await this.scheduleMaintenanceAlarm();
   }
 
   async alarm(): Promise<void> {
+    this.rebuildSessionsFromHibernation();
     const now = Date.now();
 
-    // Nobody connected → empty grace wipe
+    // ——— Empty room: only wipe when NO sockets for a long grace ———
     if (this.openConnectionCount() === 0) {
       if (!this.room) {
         await this.ctx.storage.deleteAll();
@@ -289,31 +299,42 @@ export class Room extends DurableObject<Env> {
       return;
     }
 
+    // ——— Anyone connected: room MUST stay alive ———
     if (!this.room) {
       await this.ctx.storage.deleteAlarm();
       return;
     }
 
-    // Host gone (no live socket) and silent too long → dissolve
-    if (!this.isHostLive()) {
-      const quietFor = now - (this.room.lastHostActivityAtMs || 0);
-      if (quietFor >= this.hostStaleMs()) {
-        await this.dissolveRoom(
-          "host_left",
-          "Host disconnected — room closed",
-        );
-        return;
-      }
-      await this.ctx.storage.setAlarm(
-        (this.room.lastHostActivityAtMs || now) + this.hostStaleMs(),
-      );
+    if (this.isHostLive()) {
+      this.room.hostGoneAtMs = null;
+      await this.persist();
+      // No dissolve timer while populated — only re-check if host later drops
+      await this.ctx.storage.deleteAlarm();
       return;
     }
 
-    // Host live — no wipe. Optional next check far out if they go quiet.
-    await this.ctx.storage.setAlarm(
-      (this.room.lastHostActivityAtMs || now) + this.hostStaleMs(),
-    );
+    // Host socket gone, peers remain → wait for reclaim, then promote
+    const goneAt =
+      this.room.hostGoneAtMs ??
+      this.room.lastHostActivityAtMs ??
+      now;
+    if (this.room.hostGoneAtMs == null) {
+      this.room.hostGoneAtMs = goneAt;
+      await this.persist();
+    }
+
+    if (now - goneAt >= this.hostReclaimMs()) {
+      const promoted = await this.promoteOldestHost();
+      if (promoted) {
+        this.broadcastState();
+        this.broadcastMembers();
+      }
+      // Stay alive either way
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+
+    await this.ctx.storage.setAlarm(goneAt + this.hostReclaimMs());
   }
 
   private async handleClientMessage(
@@ -335,8 +356,7 @@ export class Room extends DurableObject<Env> {
       this.sessions.set(ws, session);
 
       const now = Date.now();
-      // Claim host if none, or if previous host session is no longer connected
-      // (reconnect after soft-disconnect / network blip).
+      // Claim host if none / dead host (reconnect after DO drop).
       if (!this.room.state.hostSessionId || !this.isHostLive()) {
         this.room.state = {
           ...this.room.state,
@@ -346,12 +366,15 @@ export class Room extends DurableObject<Env> {
           serverAnchorMs: now,
         };
         this.room.lastHostActivityAtMs = now;
+        this.room.hostGoneAtMs = null;
         await this.persist();
       }
 
       const isHost = this.room.state.hostSessionId === session.sessionId;
       if (isHost) {
         this.room.lastHostActivityAtMs = now;
+        this.room.hostGoneAtMs = null;
+        await this.persist();
       }
 
       this.send(ws, {
@@ -802,14 +825,65 @@ export class Room extends DurableObject<Env> {
     return Math.max(n, this.sessions.size);
   }
 
+  /** Pull hibernation sockets back into the in-memory map (DO wake). */
+  private rebuildSessionsFromHibernation(): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (this.sessions.has(ws)) continue;
+      const att = this.attachmentOf(ws);
+      if (att) this.sessions.set(ws, att);
+    }
+  }
+
+  private attachmentOf(ws: WebSocket): SessionAttachment | null {
+    try {
+      return ws.deserializeAttachment() as SessionAttachment | null;
+    } catch {
+      return null;
+    }
+  }
+
   /** True if the designated host still has a live hello'd socket. */
   private isHostLive(): boolean {
+    this.rebuildSessionsFromHibernation();
     const hostId = this.room?.state.hostSessionId;
     if (!hostId) return false;
     for (const session of this.sessions.values()) {
       if (session.sessionId === hostId && session.helloDone) return true;
     }
+    for (const ws of this.ctx.getWebSockets()) {
+      const att = this.attachmentOf(ws);
+      if (att?.sessionId === hostId && att.helloDone) return true;
+    }
     return false;
+  }
+
+  /** Oldest hello'd member becomes host. Returns true if changed. */
+  private async promoteOldestHost(): Promise<boolean> {
+    if (!this.room) return false;
+    this.rebuildSessionsFromHibernation();
+    let best: SessionAttachment | null = null;
+    for (const s of this.sessions.values()) {
+      if (!s.helloDone) continue;
+      if (!best || s.joinedAtMs < best.joinedAtMs) best = s;
+    }
+    if (!best) return false;
+    if (this.room.state.hostSessionId === best.sessionId) {
+      this.room.hostGoneAtMs = null;
+      this.room.lastHostActivityAtMs = Date.now();
+      await this.persist();
+      return false;
+    }
+    const now = Date.now();
+    this.room.state = {
+      ...this.room.state,
+      hostSessionId: best.sessionId,
+      version: this.room.state.version + 1,
+      updatedAtMs: now,
+    };
+    this.room.lastHostActivityAtMs = now;
+    this.room.hostGoneAtMs = null;
+    await this.persist();
+    return true;
   }
 
   private async dissolveRoom(
@@ -872,18 +946,17 @@ export class Room extends DurableObject<Env> {
     return EMPTY_ROOM_GRACE_MS;
   }
 
-  private hostStaleMs(): number {
-    const raw = this.env.HOST_STALE_MS;
+  private hostReclaimMs(): number {
+    const raw = this.env.HOST_RECLAIM_MS ?? this.env.HOST_STALE_MS;
     if (raw) {
       const n = Number(raw);
       if (Number.isFinite(n) && n > 0) return n;
     }
-    return HOST_STALE_MS;
+    return HOST_RECLAIM_MS;
   }
 
   /**
-   * Single alarm path: empty-room wipe OR host-stale dissolve.
-   * Always schedules the sooner of the two relevant deadlines.
+   * Schedule empty wipe OR host reclaim. Never schedules “dissolve while occupied”.
    */
   private async scheduleMaintenanceAlarm(): Promise<void> {
     if (!this.room) {
@@ -895,20 +968,27 @@ export class Room extends DurableObject<Env> {
     }
 
     const now = Date.now();
-    let deadline: number | null = null;
+    this.rebuildSessionsFromHibernation();
 
     if (this.openConnectionCount() === 0) {
-      deadline = (this.room.lastActiveAtMs || now) + this.emptyGraceMs();
-    } else if (!this.isHostLive()) {
-      deadline =
-        (this.room.lastHostActivityAtMs || now) + this.hostStaleMs();
-    } else {
-      // Host connected — still schedule a far check in case heartbeats stop
-      // without a clean close (hibernation edge cases).
-      deadline =
-        (this.room.lastHostActivityAtMs || now) + this.hostStaleMs();
+      await this.ctx.storage.setAlarm(
+        (this.room.lastActiveAtMs || now) + this.emptyGraceMs(),
+      );
+      return;
     }
 
-    await this.ctx.storage.setAlarm(deadline);
+    if (!this.isHostLive()) {
+      const goneAt =
+        this.room.hostGoneAtMs ?? this.room.lastHostActivityAtMs ?? now;
+      if (this.room.hostGoneAtMs == null) {
+        this.room.hostGoneAtMs = goneAt;
+        await this.persist();
+      }
+      await this.ctx.storage.setAlarm(goneAt + this.hostReclaimMs());
+      return;
+    }
+
+    // Occupied + host live → no maintenance timer (room stays)
+    await this.ctx.storage.deleteAlarm();
   }
 }

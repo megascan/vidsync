@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
-use tokio::net::TcpStream;
 use tracing::{info, warn};
 
 use crate::protocol::{ClientMessage, ServerMessage};
@@ -20,12 +20,10 @@ type WsStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SyncEvent {
     Connected,
-    /// Transient drop — will retry. UI should show soft status, not leave room.
     Reconnecting {
         attempt: u32,
         reason: String,
     },
-    /// Permanent end (user leave or room gone).
     Disconnected {
         reason: String,
     },
@@ -77,11 +75,9 @@ impl SyncHandle {
 enum SessionEnd {
     UserShutdown,
     RoomClosed,
-    Dropped { reason: String },
+    Dropped { reason: String, welcomed: bool },
 }
 
-/// Connect with automatic reconnect until leave or room_closed.
-/// First dial is awaited so create/join fails fast if the edge is down.
 pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (out_tx, out_rx) = mpsc::unbounded_channel::<ClientMessage>();
@@ -116,7 +112,6 @@ async fn run_reconnect_loop(
         let ws = if let Some(ws) = primed.take() {
             ws
         } else {
-            // Wait for leave or dial
             match dial_with_cancel(&ws_url, &mut shutdown_rx).await {
                 DialResult::Shutdown => {
                     let _ = event_tx.send(SyncEvent::Disconnected {
@@ -160,8 +155,13 @@ async fn run_reconnect_loop(
                 });
                 return;
             }
-            SessionEnd::Dropped { reason } => {
-                attempt = attempt.saturating_add(1);
+            SessionEnd::Dropped { reason, welcomed } => {
+                // After a healthy session, soft restart backoff (DO blips are brief)
+                attempt = if welcomed {
+                    1
+                } else {
+                    attempt.saturating_add(1)
+                };
                 let delay_ms = reconnect_delay_ms(attempt);
                 info!("ws dropped ({reason}); reconnect #{attempt} in {delay_ms}ms");
                 let _ = event_tx.send(SyncEvent::Reconnecting {
@@ -177,7 +177,6 @@ async fn run_reconnect_loop(
                     }
                     _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
                 }
-                // successful reconnect resets attempt after Connected+Welcome
             }
         }
     }
@@ -203,8 +202,9 @@ async fn dial_with_cancel(
 }
 
 fn reconnect_delay_ms(attempt: u32) -> u64 {
-    let exp = 500u64.saturating_mul(1u64 << attempt.min(5));
-    exp.min(10_000)
+    // 200ms, 400, 800, 1.6s, 3.2s → cap 5s
+    let exp = 200u64.saturating_mul(1u64 << attempt.min(6));
+    exp.min(5_000)
 }
 
 async fn run_session(
@@ -218,6 +218,7 @@ async fn run_session(
     let _ = event_tx.send(SyncEvent::Connected);
 
     let (mut write, mut read) = ws.split();
+    let mut welcomed = false;
 
     let hello = ClientMessage::Hello {
         nickname: Some(nickname.to_string()),
@@ -229,17 +230,19 @@ async fn run_session(
             if write.send(Message::Text(hello_txt.into())).await.is_err() {
                 return SessionEnd::Dropped {
                     reason: "hello send failed".into(),
+                    welcomed: false,
                 };
             }
         }
         Err(e) => {
             return SessionEnd::Dropped {
                 reason: format!("hello serialize: {e}"),
+                welcomed: false,
             };
         }
     }
 
-    let mut ping_tick = tokio::time::interval(Duration::from_secs(20));
+    let mut ping_tick = tokio::time::interval(Duration::from_secs(15));
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping_tick.tick().await;
 
@@ -251,10 +254,16 @@ async fn run_session(
             }
             _ = ping_tick.tick() => {
                 if write.send(Message::Ping(Vec::new().into())).await.is_err() {
-                    return SessionEnd::Dropped { reason: "ping failed".into() };
+                    return SessionEnd::Dropped {
+                        reason: "ping failed".into(),
+                        welcomed,
+                    };
                 }
                 if write.send(Message::Text("ping".into())).await.is_err() {
-                    return SessionEnd::Dropped { reason: "ping failed".into() };
+                    return SessionEnd::Dropped {
+                        reason: "ping failed".into(),
+                        welcomed,
+                    };
                 }
             }
             msg = out_rx.recv() => {
@@ -265,6 +274,7 @@ async fn run_session(
                                 if write.send(Message::Text(s.into())).await.is_err() {
                                     return SessionEnd::Dropped {
                                         reason: "send failed".into(),
+                                        welcomed,
                                     };
                                 }
                             }
@@ -293,6 +303,9 @@ async fn run_session(
                                 return SessionEnd::RoomClosed;
                             }
                             Ok(sm) => {
+                                if matches!(sm, ServerMessage::Welcome { .. }) {
+                                    welcomed = true;
+                                }
                                 if let Some(ev) = map_server(sm) {
                                     if event_tx.send(ev).is_err() {
                                         return SessionEnd::UserShutdown;
@@ -309,12 +322,14 @@ async fn run_session(
                     Some(Ok(Message::Close(_))) | None => {
                         return SessionEnd::Dropped {
                             reason: "socket closed".into(),
+                            welcomed,
                         };
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
                         return SessionEnd::Dropped {
                             reason: format!("{e}"),
+                            welcomed,
                         };
                     }
                 }
@@ -375,7 +390,6 @@ fn host_platform() -> &'static str {
     }
 }
 
-/// Join existing room code.
 pub async fn join_room(api_base: &str, code: &str, nickname: String) -> Result<SyncHandle> {
     let code = code.trim().to_uppercase();
     if code.len() != 8 {
@@ -385,7 +399,6 @@ pub async fn join_room(api_base: &str, code: &str, nickname: String) -> Result<S
     connect(ws, nickname).await
 }
 
-/// Create room then connect.
 pub async fn create_and_join(api_base: &str, nickname: String) -> Result<(String, SyncHandle)> {
     let created = crate::api::create_room(api_base).await?;
     let handle = connect(created.ws_url, nickname).await?;
