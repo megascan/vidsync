@@ -268,7 +268,7 @@ async function handleFetch(message, sendResponse) {
           error: "body_too_large",
           status: res.status,
           headers: outHeaders,
-          message: `File is ${Math.round(n / 1024 / 1024)}MB (max ${MAX_BODY_BYTES / 1024 / 1024}MB for full download). CORS shim is on — try normal play, or use HLS.`,
+          message: `File is ~${Math.round(n / 1024 / 1024)}MB — skip full download. Use CORS shim + normal/Range play (Open with Unblock does that for progressive). HLS segments stay small.`,
         });
         return;
       }

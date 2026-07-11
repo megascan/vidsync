@@ -164,19 +164,36 @@ function makeUnblockLoader(
   } as unknown as new (config: unknown) => HlsLoaderInstance;
 }
 
-async function attachProgressiveUnblock(
+/** Only for small files. Large progressive media uses CORS shim + native Range. */
+async function attachProgressiveUnblockBlob(
   video: HTMLVideoElement,
   url: string,
   onError: (message: string) => void,
   onStatus?: (message: string) => void,
 ): Promise<() => void> {
-  onStatus?.("Fetching media via Unblock…");
+  onStatus?.("Checking size via Unblock…");
+  const head = await unblockFetch(url, {
+    method: "HEAD",
+    responseType: "headers-only",
+  });
+  if (head.ok) {
+    const lenRaw =
+      head.headers["content-length"] ?? head.headers["Content-Length"];
+    const len = lenRaw ? Number(lenRaw) : NaN;
+    if (Number.isFinite(len) && len > 80 * 1024 * 1024) {
+      onError(
+        `File is ~${Math.round(len / 1024 / 1024)}MB — too large to download whole. CORS shim is on; use Open with Unblock (native Range play) or switch to HLS.`,
+      );
+      return () => undefined;
+    }
+  }
+
+  onStatus?.("Fetching small file via Unblock…");
   const res = await unblockFetch(url);
   if (!res.ok || !res.bodyBase64) {
-    const msg =
-      res.ok
-        ? "Empty media body via Unblock"
-        : (res.message ?? res.error ?? "Unblock fetch failed");
+    const msg = res.ok
+      ? "Empty media body via Unblock"
+      : (res.message ?? res.error ?? "Unblock fetch failed");
     onError(msg);
     return () => undefined;
   }
@@ -185,7 +202,7 @@ async function attachProgressiveUnblock(
   const objectUrl = URL.createObjectURL(blob);
   video.src = objectUrl;
   video.load();
-  onStatus?.("Loaded via Unblock");
+  onStatus?.("Loaded via Unblock blob");
   return () => {
     URL.revokeObjectURL(objectUrl);
   };
@@ -220,7 +237,7 @@ export function attachVideoSource(
       (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ||
         code === MediaError.MEDIA_ERR_NETWORK)
     ) {
-      void attachProgressiveUnblock(video, url, onError, onStatus).then(
+      void attachProgressiveUnblockBlob(video, url, onError, onStatus).then(
         (revoke) => {
           if (destroyed) {
             revoke();
@@ -308,50 +325,43 @@ export function attachVideoSource(
       }
     });
   } else if (forceUnblock) {
-    // 1) Cache-busted direct (DNR CORS shim helps <video> + seeking)
-    // 2) If that fails, blob via extension (≤80MB)
+    // Large progressive (GB): never full-download. DNR CORS shim + native
+    // <video> Range seeking is the only workable path.
     const bust = withUnblockCacheBust(url);
-    onStatus?.("Opening via Unblock CORS shim…");
+    onStatus?.(
+      "CORS shim on — streaming with browser Range (no full download)…",
+    );
+    // Avoid crossorigin so the element can play without tainting/strict CORS
+    video.removeAttribute("crossorigin");
     video.src = bust;
     video.load();
 
-    const fallbackTimer = window.setTimeout(() => {
-      if (destroyed || revokeBlob) {
-        settled();
-        return;
-      }
-      // If still no data after a moment, try full extension fetch
-      if (video.readyState < 2 && (video.error || video.networkState === 3)) {
-        onStatus?.("Direct load weak — fetching full file via Unblock…");
-        void attachProgressiveUnblock(video, url, onError, onStatus).then(
-          (revoke) => {
-            if (destroyed) {
-              revoke();
-              settled();
-              return;
-            }
-            revokeBlob = revoke;
-            settled();
-          },
-        );
-      } else {
-        settled();
-      }
-    }, 1500);
-
-    // Also listen once for canplay
     const onCanPlay = () => {
-      window.clearTimeout(fallbackTimer);
-      onStatus?.("Playing (Unblock CORS)");
+      onStatus?.("Streaming (Unblock CORS + Range)");
       settled();
     };
+    const onLoadedMeta = () => {
+      onStatus?.("Metadata loaded — seeking/play should work");
+    };
     video.addEventListener("canplay", onCanPlay, { once: true });
+    video.addEventListener("loadedmetadata", onLoadedMeta, { once: true });
+
+    // Don't auto full-download if buffering is slow (multi-GB is normal)
+    const settleTimer = window.setTimeout(() => {
+      if (!destroyed) {
+        onStatus?.(
+          "Stream requested via Unblock. If it still fails, origin may block Range or the URL is unreachable.",
+        );
+        settled();
+      }
+    }, 2500);
 
     return {
       destroy: () => {
         destroyed = true;
-        window.clearTimeout(fallbackTimer);
+        window.clearTimeout(settleTimer);
         video.removeEventListener("canplay", onCanPlay);
+        video.removeEventListener("loadedmetadata", onLoadedMeta);
         video.removeEventListener("error", onVideoError);
         if (hls) {
           hls.destroy();
