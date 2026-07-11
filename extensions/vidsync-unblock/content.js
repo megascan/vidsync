@@ -1,6 +1,5 @@
 /**
- * Content script — bridges VidSync page ↔ extension background.
- * Chrome will NOT auto-open the toolbar popup; site UI is the surface.
+ * Content script on VidSync pages — bridges room page ↔ background ↔ player popup.
  */
 
 const CHANNEL = "vidsync-unblock";
@@ -14,12 +13,10 @@ const VERSION = chrome.runtime.getManifest().version;
 
 function markDom() {
   try {
-    const el = document.documentElement;
-    if (!el) return;
-    el.dataset.vidsyncUnblock = "1";
-    el.dataset.vidsyncUnblockVersion = VERSION;
+    document.documentElement.dataset.vidsyncUnblock = "1";
+    document.documentElement.dataset.vidsyncUnblockVersion = VERSION;
   } catch {
-    /* ignore */
+    /* */
   }
 }
 
@@ -31,6 +28,7 @@ function injectMainWorldFlag() {
         window.__VIDSYNC_UNBLOCK__ = {
           version: ${JSON.stringify(VERSION)},
           ready: true,
+          mode: "extension_player",
           channel: ${JSON.stringify(CHANNEL)}
         };
         document.documentElement.dataset.vidsyncUnblock = "1";
@@ -40,26 +38,16 @@ function injectMainWorldFlag() {
         }));
       } catch (e) {}
     })();`;
-    const root = document.documentElement || document.head || document;
-    root.appendChild(script);
+    (document.documentElement || document).appendChild(script);
     script.remove();
   } catch {
-    /* ignore */
+    /* */
   }
 }
 
 function announce() {
   markDom();
   injectMainWorldFlag();
-  try {
-    window.dispatchEvent(
-      new CustomEvent("vidsync-unblock-ready", {
-        detail: { version: VERSION, ready: true },
-      }),
-    );
-  } catch {
-    /* ignore */
-  }
   try {
     window.postMessage(
       {
@@ -68,27 +56,47 @@ function announce() {
         type: "ready",
         version: VERSION,
         ok: true,
+        mode: "extension_player",
       },
       window.location.origin,
     );
   } catch {
-    /* ignore */
+    /* */
   }
 }
 
 announce();
-[0, 100, 500, 1500, 3000].forEach((ms) => setTimeout(announce, ms));
+[0, 100, 500, 1500].forEach((ms) => setTimeout(announce, ms));
+
+// Background → content → page (player ticks)
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "room_from_player") {
+    window.postMessage(
+      {
+        channel: CHANNEL,
+        direction: "event",
+        type: "player_tick",
+        positionMs: message.positionMs,
+        isPlaying: message.isPlaying,
+        durationMs: message.durationMs,
+        videoUrl: message.videoUrl,
+      },
+      window.location.origin,
+    );
+    sendResponse({ ok: true });
+    return false;
+  }
+  return false;
+});
 
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   if (!ALLOWED_ORIGINS.has(event.origin)) return;
-
   const data = event.data;
   if (!data || data.channel !== CHANNEL) return;
   if (data.direction === "response" || data.direction === "event") return;
   if (data.direction !== "request") return;
   if (typeof data.id !== "string" || typeof data.type !== "string") return;
-
   void handlePageRequest(data);
 });
 
@@ -115,26 +123,53 @@ async function handlePageRequest(data) {
         reply({
           ok: true,
           version: res?.version ?? VERSION,
-          cors: Boolean(res?.cors),
-          bridge: "content+background",
+          mode: res?.mode ?? "extension_player",
         });
       } catch {
-        reply({ ok: true, version: VERSION, bridge: "content-only" });
+        reply({ ok: true, version: VERSION, mode: "extension_player" });
       }
       return;
     }
 
+    if (data.type === "open_player") {
+      const payload = data.payload ?? {};
+      const res = await chrome.runtime.sendMessage({
+        type: "open_player",
+        url: payload.url,
+        state: payload.state ?? null,
+      });
+      reply(res ?? { ok: false, error: "no_response" });
+      return;
+    }
+
+    if (data.type === "player_state") {
+      const res = await chrome.runtime.sendMessage({
+        type: "player_state",
+        state: data.payload?.state ?? data.payload,
+      });
+      reply(res ?? { ok: false });
+      return;
+    }
+
+    if (data.type === "player_control") {
+      const res = await chrome.runtime.sendMessage({
+        type: "player_control",
+        controlType: data.payload?.controlType,
+        positionMs: data.payload?.positionMs,
+        isPlaying: data.payload?.isPlaying,
+      });
+      reply(res ?? { ok: false });
+      return;
+    }
+
+    if (data.type === "close_player") {
+      const res = await chrome.runtime.sendMessage({ type: "close_player" });
+      reply(res ?? { ok: true });
+      return;
+    }
+
     if (data.type === "enable_cors") {
-      try {
-        const res = await chrome.runtime.sendMessage({ type: "enable_cors" });
-        reply(res ?? { ok: false, error: "no_response" });
-      } catch (e) {
-        reply({
-          ok: false,
-          error: "enable_cors_failed",
-          message: e instanceof Error ? e.message : "enable failed",
-        });
-      }
+      reply({ ok: true, mode: "extension_player" });
       return;
     }
 
@@ -164,5 +199,5 @@ async function handlePageRequest(data) {
 try {
   chrome.runtime.sendMessage({ type: "tab_active", active: true }).catch(() => {});
 } catch {
-  /* ignore */
+  /* */
 }

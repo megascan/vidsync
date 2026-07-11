@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   HOST_HEARTBEAT_MS,
   MAX_CHAT_LENGTH,
+  expectedPositionMs,
   isAllowedVideoUrl,
   type PlaybackState,
 } from "@vidsync/shared";
@@ -20,9 +21,12 @@ import { parseRoomCodeFromLocation } from "../../lib/roomCode";
 import { applyDrift, SyncClient } from "../../lib/sync/client";
 import { useRoomStore } from "../../lib/store/roomStore";
 import {
-  enableUnblockCors,
+  onUnblockPlayerTick,
   onUnblockReady,
+  openUnblockPlayer,
   pingUnblock,
+  pushUnblockPlayerControl,
+  pushUnblockPlayerState,
 } from "../../lib/unblock/bridge";
 import UnblockStatus from "./UnblockStatus";
 
@@ -53,6 +57,14 @@ function formatChatTime(ms: number): string {
   } catch {
     return "";
   }
+}
+
+function expectedPositionForPush(
+  playback: PlaybackState,
+  clockOffsetMs: number,
+): number {
+  const nowServer = Date.now() + clockOffsetMs;
+  return expectedPositionMs(playback, nowServer);
 }
 
 export default function RoomApp() {
@@ -94,11 +106,11 @@ export default function RoomApp() {
   /** Wait for nick pick before opening WS when no local nick yet */
   const [nickReady, setNickReady] = useState(false);
   const [unblockOn, setUnblockOn] = useState(false);
-  /** Bumps to re-run attachVideoSource */
-  const [mediaReload, setMediaReload] = useState(0);
-  const [forceUnblock, setForceUnblock] = useState(false);
+  /** Media plays in extension popup (no page CORS); room tab only syncs. */
+  const [extPlayerMode, setExtPlayerMode] = useState(false);
   const [openingUnblock, setOpeningUnblock] = useState(false);
   const [unblockStatus, setUnblockStatus] = useState<string | null>(null);
+  const extPositionRef = useRef({ positionMs: 0, isPlaying: false });
 
   useEffect(() => {
     const resolved = parseRoomCodeFromLocation(
@@ -187,12 +199,14 @@ export default function RoomApp() {
     });
   }, []);
 
-  // New queue item → normal attach unless user forced Unblock this session
+  // New queue item → leave ext player mode until user opens again
   useEffect(() => {
-    setForceUnblock(false);
+    setExtPlayerMode(false);
     setOpeningUnblock(false);
+    setUnblockStatus(null);
   }, [playback?.videoUrl]);
 
+  // In-page player only when NOT using extension popup
   useEffect(() => {
     const video = videoRef.current;
     const url = playback?.videoUrl;
@@ -201,34 +215,49 @@ export default function RoomApp() {
     sourceRef.current?.destroy();
     sourceRef.current = null;
     setMediaError(null);
-    if (!forceUnblock) setUnblockStatus(null);
 
-    if (!url) {
+    if (!url || extPlayerMode) {
       setOpeningUnblock(false);
+      if (extPlayerMode) {
+        video.removeAttribute("src");
+        video.load();
+      }
       return;
     }
 
-    sourceRef.current = attachVideoSource(
-      video,
-      url,
-      (msg) => {
-        setMediaError(msg);
-        setOpeningUnblock(false);
-      },
-      {
-        preferUnblock: true,
-        forceUnblock,
-        onStatus: (msg) => setUnblockStatus(msg),
-        onSettled: () => setOpeningUnblock(false),
-      },
-    );
+    sourceRef.current = attachVideoSource(video, url, setMediaError, {
+      preferUnblock: false,
+    });
     return () => {
       sourceRef.current?.destroy();
       sourceRef.current = null;
     };
-  }, [playback?.videoUrl, mediaReload, forceUnblock, setMediaError]);
+  }, [playback?.videoUrl, extPlayerMode, setMediaError]);
 
+  // Push room playback state into extension player (followers + host resync)
   useEffect(() => {
+    if (!extPlayerMode || !playback?.videoUrl) return;
+    void pushUnblockPlayerState({
+      videoUrl: playback.videoUrl,
+      isPlaying: playback.isPlaying,
+      positionMs: expectedPositionForPush(playback, clockOffsetMs),
+    });
+  }, [extPlayerMode, playback, clockOffsetMs]);
+
+  // Ticks from extension player → host heartbeat / local ref
+  useEffect(() => {
+    if (!extPlayerMode) return;
+    return onUnblockPlayerTick((tick) => {
+      extPositionRef.current = {
+        positionMs: tick.positionMs,
+        isPlaying: tick.isPlaying,
+      };
+    });
+  }, [extPlayerMode]);
+
+  // In-page drift only when not using extension player
+  useEffect(() => {
+    if (extPlayerMode) return;
     const video = videoRef.current;
     if (!video || !playback) return;
     lastVersion.current = playback.version;
@@ -257,20 +286,38 @@ export default function RoomApp() {
       }
     };
     void run();
-  }, [playback, clockOffsetMs, isHost]);
+  }, [playback, clockOffsetMs, isHost, extPlayerMode]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      const video = videoRef.current;
       const client = clientRef.current;
       const state = useRoomStore.getState().playback;
       const host = useRoomStore.getState().isHost;
       const offset = useRoomStore.getState().clockOffsetMs;
-      if (!video || !state?.videoUrl) return;
+      if (!state?.videoUrl || !client) return;
 
+      if (extPlayerMode) {
+        if (host && state.isPlaying) {
+          client.send({
+            type: "heartbeat",
+            positionMs: extPositionRef.current.positionMs,
+            isPlaying: extPositionRef.current.isPlaying,
+          });
+        } else if (!host) {
+          void pushUnblockPlayerState({
+            videoUrl: state.videoUrl,
+            isPlaying: state.isPlaying,
+            positionMs: expectedPositionForPush(state, offset),
+          });
+        }
+        return;
+      }
+
+      const video = videoRef.current;
+      if (!video) return;
       if (!host) {
         applyDrift(video, state, offset);
-      } else if (state.isPlaying && client) {
+      } else if (state.isPlaying) {
         client.send({
           type: "heartbeat",
           positionMs: video.currentTime * 1000,
@@ -280,44 +327,66 @@ export default function RoomApp() {
     }, HOST_HEARTBEAT_MS);
 
     return () => window.clearInterval(id);
-  }, []);
+  }, [extPlayerMode]);
 
-  const sendHost = useCallback(
-    (fn: (positionMs: number) => void) => {
-      if (!isHost || !clientRef.current || !videoRef.current) return;
-      fn(videoRef.current.currentTime * 1000);
-    },
-    [isHost],
-  );
+  const positionMsNow = useCallback(() => {
+    if (extPlayerMode) return extPositionRef.current.positionMs;
+    return (videoRef.current?.currentTime ?? 0) * 1000;
+  }, [extPlayerMode]);
 
   const onPlayClick = () => {
     if (!playback?.videoUrl) {
       setLastError("Queue a video first");
       return;
     }
-    sendHost((positionMs) => {
-      clientRef.current?.send({ type: "play", positionMs });
+    if (!isHost || !clientRef.current) return;
+    const positionMs = positionMsNow();
+    clientRef.current.send({ type: "play", positionMs });
+    if (extPlayerMode) {
+      void pushUnblockPlayerControl({
+        controlType: "play",
+        positionMs,
+      });
+    } else {
       void videoRef.current?.play();
-    });
+    }
   };
 
   const onPauseClick = () => {
-    sendHost((positionMs) => {
-      clientRef.current?.send({ type: "pause", positionMs });
+    if (!isHost || !clientRef.current) return;
+    const positionMs = positionMsNow();
+    clientRef.current.send({ type: "pause", positionMs });
+    if (extPlayerMode) {
+      void pushUnblockPlayerControl({
+        controlType: "pause",
+        positionMs,
+      });
+    } else {
       videoRef.current?.pause();
-    });
+    }
   };
 
   const onSeek = (value: number) => {
-    const video = videoRef.current;
-    if (!video || !isHost) return;
+    if (!isHost || !clientRef.current) return;
     const positionMs = value * 1000;
-    video.currentTime = value;
-    clientRef.current?.send({
+    const isPlaying = extPlayerMode
+      ? extPositionRef.current.isPlaying
+      : !(videoRef.current?.paused ?? true);
+    if (!extPlayerMode && videoRef.current) {
+      videoRef.current.currentTime = value;
+    }
+    clientRef.current.send({
       type: "seek",
       positionMs,
-      isPlaying: !video.paused,
+      isPlaying,
     });
+    if (extPlayerMode) {
+      void pushUnblockPlayerControl({
+        controlType: "seek",
+        positionMs,
+        isPlaying,
+      });
+    }
   };
 
   const onQueueAdd = () => {
@@ -377,7 +446,10 @@ export default function RoomApp() {
     }
   };
 
-  /** Reload current queue item through the extension (explicit user action). */
+  /**
+   * Open extension player popup — streams with Range under extension origin
+   * (no page CORS). Room tab keeps DO sync and relays controls.
+   */
   const onOpenWithUnblock = () => {
     void (async () => {
       if (!playback?.videoUrl) {
@@ -388,7 +460,7 @@ export default function RoomApp() {
       setOpeningUnblock(true);
       setMediaError(null);
       setLastError(null);
-      setUnblockStatus("Talking to extension…");
+      setUnblockStatus("Opening Unblock player window…");
 
       const ping = await pingUnblock();
       if (!ping.ok) {
@@ -402,17 +474,33 @@ export default function RoomApp() {
       }
       setUnblockOn(true);
 
-      const cors = await enableUnblockCors();
-      if (!cors.ok) {
-        setUnblockStatus(
-          `CORS shim warn: ${cors.message ?? "failed"} — still trying load…`,
+      const opened = await openUnblockPlayer(playback.videoUrl, {
+        videoUrl: playback.videoUrl,
+        isPlaying: playback.isPlaying,
+        positionMs: expectedPositionForPush(playback, clockOffsetMs),
+      });
+
+      setOpeningUnblock(false);
+      if (!opened.ok) {
+        setLastError(
+          opened.message ??
+            "Could not open extension player. Reload the extension.",
         );
-      } else {
-        setUnblockStatus("CORS shim on — reloading stream…");
+        setUnblockStatus(null);
+        return;
       }
 
-      setForceUnblock(true);
-      setMediaReload((n) => n + 1);
+      setExtPlayerMode(true);
+      setUnblockStatus(
+        "Playing in Unblock window (streams with Range). Keep this room tab open for sync.",
+      );
+      // Stop in-page media so only the popup streams
+      sourceRef.current?.destroy();
+      sourceRef.current = null;
+      if (videoRef.current) {
+        videoRef.current.removeAttribute("src");
+        videoRef.current.load();
+      }
     })();
   };
 
@@ -427,28 +515,25 @@ export default function RoomApp() {
   };
 
   const onVideoPlay = () => {
-    if (applyingRemote.current || !isHost) {
-      if (!isHost && videoRef.current && playback && !playback.isPlaying) {
+    if (extPlayerMode || applyingRemote.current || !isHost) {
+      if (!isHost && !extPlayerMode && videoRef.current && playback && !playback.isPlaying) {
         videoRef.current.pause();
       }
       return;
     }
-    if (!playback?.videoUrl) return;
-    sendHost((positionMs) => {
-      clientRef.current?.send({ type: "play", positionMs });
-    });
+    if (!playback?.videoUrl || !clientRef.current) return;
+    clientRef.current.send({ type: "play", positionMs: positionMsNow() });
   };
 
   const onVideoPause = () => {
-    if (applyingRemote.current || !isHost) {
-      if (!isHost && videoRef.current && playback?.isPlaying) {
+    if (extPlayerMode || applyingRemote.current || !isHost) {
+      if (!isHost && !extPlayerMode && videoRef.current && playback?.isPlaying) {
         void videoRef.current.play().catch(() => undefined);
       }
       return;
     }
-    sendHost((positionMs) => {
-      clientRef.current?.send({ type: "pause", positionMs });
-    });
+    if (!clientRef.current) return;
+    clientRef.current.send({ type: "pause", positionMs: positionMsNow() });
   };
 
   // Nick gate before join
@@ -554,20 +639,31 @@ export default function RoomApp() {
           <section className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-black">
             <video
               ref={videoRef}
-              className={`aspect-video w-full bg-black ${hasVideo ? "" : "hidden"}`}
+              className={`aspect-video w-full bg-black ${hasVideo && !extPlayerMode ? "" : "hidden"}`}
               playsInline
-              controls={isHost}
+              controls={isHost && !extPlayerMode}
               onPlay={onVideoPlay}
               onPause={onVideoPause}
             />
-            {!hasVideo ? (
+            {extPlayerMode ? (
+              <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-[var(--color-surface)] px-6 text-center">
+                <p className="text-sm font-medium text-[var(--color-accent)]">
+                  Streaming in Unblock window
+                </p>
+                <p className="max-w-sm text-xs leading-relaxed text-[var(--color-muted)]">
+                  Video plays in the extension popup (Range stream, no page
+                  CORS). This tab only keeps the room + sync. Host controls
+                  still work here.
+                </p>
+              </div>
+            ) : !hasVideo ? (
               <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-[var(--color-surface)] px-6 text-center">
                 <p className="text-sm font-medium text-[var(--color-text)]">
                   Empty sync room
                 </p>
                 <p className="max-w-sm text-xs leading-relaxed text-[var(--color-muted)]">
                   {isHost
-                    ? "Queue an http(s) stream URL to start watching together."
+                    ? "Queue an http(s) stream URL, then Stream with Unblock for big files."
                     : "Waiting for the host to queue a video."}
                 </p>
               </div>
@@ -628,10 +724,12 @@ export default function RoomApp() {
                   }
                 >
                   {openingUnblock
-                    ? "Starting stream…"
-                    : unblockOn
-                      ? "Stream with Unblock"
-                      : "Stream with Unblock (install ext)"}
+                    ? "Opening player…"
+                    : extPlayerMode
+                      ? "Reopen Unblock player"
+                      : unblockOn
+                        ? "Stream with Unblock"
+                        : "Stream with Unblock (install ext)"}
                 </button>
                 <button
                   type="button"
@@ -657,7 +755,7 @@ export default function RoomApp() {
               {hasVideo ? (
                 <p className="truncate font-mono text-xs text-[var(--color-muted)]">
                   Now: {playback?.videoUrl}
-                  {forceUnblock ? " · via Unblock" : ""}
+                  {extPlayerMode ? " · Unblock player window" : ""}
                 </p>
               ) : null}
             </div>

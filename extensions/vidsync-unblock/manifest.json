@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "VidSync Unblock",
-  "version": "1.2.0",
-  "description": "VidSync helper: streaming CORS for multi‑GB progressive video (Range) + HLS segments. No full-file download of huge media.",
-  "permissions": ["storage", "tabs", "declarativeNetRequest"],
+  "version": "2.0.0",
+  "description": "VidSync: opens an extension player window that streams multi‑GB video (Range) without page CORS, and syncs with the room tab.",
+  "permissions": ["storage", "tabs"],
   "host_permissions": ["*://*/*"],
   "background": {
     "service_worker": "background.js"
@@ -28,5 +28,11 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["player.html", "player.js"],
+      "matches": ["https://vidsync.ratt.ing/*", "http://localhost:4321/*"]
+    }
+  ]
 }

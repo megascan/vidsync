@@ -18,15 +18,21 @@ export type UnblockFetchError = {
 
 export type UnblockFetchResponse = UnblockFetchResult | UnblockFetchError;
 
+export type PlayerTick = {
+  positionMs: number;
+  isPlaying: boolean;
+  durationMs: number | null;
+  videoUrl: string | null;
+};
+
 type Pending = {
-  resolve: (
-    v: UnblockFetchResponse | { ok: true; version: string | null },
-  ) => void;
+  resolve: (v: Record<string, unknown>) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 };
 
 const pending = new Map<string, Pending>();
+const tickListeners = new Set<(t: PlayerTick) => void>();
 let listening = false;
 
 declare global {
@@ -35,6 +41,7 @@ declare global {
       version?: string;
       ready?: boolean;
       channel?: string;
+      mode?: string;
     };
   }
 }
@@ -51,11 +58,14 @@ function ensureListener(): void {
       type?: string;
       version?: string;
       ok?: boolean;
+      positionMs?: number;
+      isPlaying?: boolean;
+      durationMs?: number | null;
+      videoUrl?: string | null;
       [key: string]: unknown;
     } | null;
     if (!data || data.channel !== CHANNEL) return;
 
-    // Extension ready broadcast (no id)
     if (data.direction === "event" && data.type === "ready") {
       window.dispatchEvent(
         new CustomEvent("vidsync-unblock-ready", {
@@ -65,15 +75,25 @@ function ensureListener(): void {
       return;
     }
 
+    if (data.direction === "event" && data.type === "player_tick") {
+      const tick: PlayerTick = {
+        positionMs: Number(data.positionMs) || 0,
+        isPlaying: Boolean(data.isPlaying),
+        durationMs:
+          typeof data.durationMs === "number" ? data.durationMs : null,
+        videoUrl: typeof data.videoUrl === "string" ? data.videoUrl : null,
+      };
+      for (const cb of tickListeners) cb(tick);
+      return;
+    }
+
     if (data.direction !== "response") return;
     if (typeof data.id !== "string") return;
     const p = pending.get(data.id);
     if (!p) return;
     clearTimeout(p.timer);
     pending.delete(data.id);
-    p.resolve(
-      data as UnblockFetchResponse | { ok: true; version: string | null },
-    );
+    p.resolve(data as Record<string, unknown>);
   });
 }
 
@@ -85,7 +105,7 @@ function pageRequest(
   type: string,
   payload?: Record<string, unknown>,
   timeoutMs = 60_000,
-): Promise<UnblockFetchResponse | { ok: true; version: string | null }> {
+): Promise<Record<string, unknown>> {
   ensureListener();
   return new Promise((resolve, reject) => {
     const id = requestId();
@@ -107,7 +127,6 @@ function pageRequest(
   });
 }
 
-/** True if content script marked the page or MAIN-world flag is set. */
 export function isUnblockInstalled(): boolean {
   if (typeof window === "undefined" || typeof document === "undefined") {
     return false;
@@ -127,26 +146,21 @@ export function getUnblockVersion(): string | null {
   );
 }
 
-/**
- * Always tries postMessage ping (even if dataset not set yet).
- * Content script can answer without the SW if needed.
- */
 export async function pingUnblock(): Promise<{
   ok: boolean;
   version: string | null;
+  mode?: string;
 }> {
   if (typeof window === "undefined") return { ok: false, version: null };
   ensureListener();
   try {
     const res = await pageRequest("ping", undefined, 2500);
-    const ok = Boolean(res && "ok" in res && res.ok);
-    const version =
-      res && "version" in res && typeof res.version === "string"
-        ? res.version
-        : getUnblockVersion();
-    return { ok, version };
+    return {
+      ok: Boolean(res.ok),
+      version: typeof res.version === "string" ? res.version : getUnblockVersion(),
+      mode: typeof res.mode === "string" ? res.mode : undefined,
+    };
   } catch {
-    // Fall back to passive markers
     if (isUnblockInstalled()) {
       return { ok: true, version: getUnblockVersion() };
     }
@@ -154,27 +168,83 @@ export async function pingUnblock(): Promise<{
   }
 }
 
-/** Ensure DNR CORS shim is registered (session rules). */
-export async function enableUnblockCors(): Promise<{
-  ok: boolean;
-  message?: string;
-}> {
-  if (typeof window === "undefined") return { ok: false, message: "no window" };
-  ensureListener();
+/** Open extension player popup/window and load stream URL (Range streaming, no page CORS). */
+export async function openUnblockPlayer(
+  url: string,
+  state?: {
+    videoUrl?: string | null;
+    isPlaying?: boolean;
+    positionMs?: number;
+  } | null,
+): Promise<{ ok: boolean; message?: string }> {
   try {
-    const res = (await pageRequest("enable_cors", undefined, 5000)) as {
-      ok?: boolean;
-      message?: string;
-      error?: string;
-    };
+    const res = await pageRequest(
+      "open_player",
+      { url, state: state ?? null },
+      8000,
+    );
     return {
-      ok: Boolean(res?.ok),
-      message: res?.message ?? res?.error,
+      ok: Boolean(res.ok),
+      message:
+        typeof res.message === "string"
+          ? res.message
+          : typeof res.error === "string"
+            ? res.error
+            : undefined,
     };
   } catch (e) {
     return {
       ok: false,
-      message: e instanceof Error ? e.message : "enable_cors timeout",
+      message: e instanceof Error ? e.message : "open_player failed",
+    };
+  }
+}
+
+/** Push full playback state to extension player (followers / resync). */
+export async function pushUnblockPlayerState(state: {
+  videoUrl: string | null;
+  isPlaying: boolean;
+  positionMs: number;
+}): Promise<void> {
+  try {
+    await pageRequest("player_state", { state }, 3000);
+  } catch {
+    // player may be closed
+  }
+}
+
+/** Host control → extension player */
+export async function pushUnblockPlayerControl(ctrl: {
+  controlType: "play" | "pause" | "seek";
+  positionMs: number;
+  isPlaying?: boolean;
+}): Promise<void> {
+  try {
+    await pageRequest("player_control", ctrl, 3000);
+  } catch {
+    // ignore
+  }
+}
+
+export function onUnblockPlayerTick(cb: (t: PlayerTick) => void): () => void {
+  ensureListener();
+  tickListeners.add(cb);
+  return () => {
+    tickListeners.delete(cb);
+  };
+}
+
+export async function enableUnblockCors(): Promise<{
+  ok: boolean;
+  message?: string;
+}> {
+  try {
+    const res = await pageRequest("enable_cors", undefined, 3000);
+    return { ok: Boolean(res.ok) };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : "timeout",
     };
   }
 }
@@ -199,7 +269,7 @@ export async function unblockFetch(
       },
       opts?.timeoutMs ?? 120_000,
     );
-    return res as UnblockFetchResponse;
+    return res as unknown as UnblockFetchResponse;
   } catch (e) {
     return {
       ok: false,
@@ -209,7 +279,6 @@ export async function unblockFetch(
   }
 }
 
-/** Cache-bust so the player re-requests after DNR rules apply. */
 export function withUnblockCacheBust(url: string): string {
   try {
     const u = new URL(url);
@@ -236,7 +305,6 @@ export function base64ToBlob(
   return new Blob([base64ToArrayBuffer(b64)], { type: contentType });
 }
 
-/** Subscribe when extension becomes ready; also polls for a few seconds. */
 export function onUnblockReady(
   cb: (version: string | null) => void,
 ): () => void {
@@ -247,9 +315,7 @@ export function onUnblockReady(
     if (!stopped) cb(v);
   };
 
-  if (isUnblockInstalled()) {
-    fire(getUnblockVersion());
-  }
+  if (isUnblockInstalled()) fire(getUnblockVersion());
 
   const handler = (e: Event) => {
     const detail = (e as CustomEvent<{ version?: string }>).detail;
@@ -257,7 +323,6 @@ export function onUnblockReady(
   };
   window.addEventListener("vidsync-unblock-ready", handler);
 
-  // Aggressive poll — content script re-announces; SPA hydration races
   const intervals = [50, 150, 400, 1000, 2000, 4000].map((ms) =>
     window.setTimeout(() => {
       void pingUnblock().then((r) => {

@@ -1,27 +1,49 @@
 # VidSync Unblock (browser extension)
 
-Optional Chromium/Firefox MV3 extension. **No Cloudflare media proxy.**
+Optional Chromium MV3 extension. **No Cloudflare media proxy. No same-page CORS hacks for multi‑GB files.**
 
-## Role
-- Room DO still syncs playhead only
-- Extension fetches queue media with host permissions (no page CORS)
-- Page never gets `chrome.*`; bridge is `window.postMessage` + content script
+## Architecture
 
-## Paths
-| Media | Without extension | With extension |
-|---|---|---|
-| Progressive MP4/WebM | `<video src>` direct | same, then blob via Unblock on error (≤80MB) |
-| HLS | hls.js / native (needs CORS) | hls.js custom loader → extension fetch per segment |
+```
+Room tab (vidsync.ratt.ing)
+  ├─ DO WebSocket: play/pause/seek/chat/queue
+  ├─ UI controls
+  └─ postMessage → content script → background
+                                      │
+                                      ├─ opens player.html (popup window)
+                                      │     chrome-extension://…/player.html
+                                      │     <video src=streamUrl>  ← Range stream
+                                      │     host_permissions = no page CORS
+                                      │
+                                      └─ relays sync both ways
+```
 
-## Security
-- Content script only on `vidsync.ratt.ing` + localhost:4321
-- Background rejects messages not from extension id + those page origins
-- Strips Cookie / Authorization from forwarded headers
-- No upload of bodies to VidSync servers
+| Surface | Role |
+|---|---|
+| Room tab | Sync authority client, queue, chat |
+| Extension player window | Actual media playback (streaming) |
 
-## Install
-See `extensions/vidsync-unblock/README.md` (load unpacked).
+## Why a separate window
+
+Loading a cross-origin multi‑GB URL **inside** the VidSync page still hits CORS for many CDNs.  
+An **extension page** can set `<video src="https://…">` with host permissions and the browser streams via **HTTP Range** without the page origin involved.
+
+## User flow
+
+1. Install unpacked `extensions/vidsync-unblock`, reload tab  
+2. Queue a stream URL in the room  
+3. Click **Stream with Unblock** → popup player opens  
+4. Keep the room tab open (sync); watch in the popup  
 
 ## Limits
-- Full-buffer progressive max 80 MiB (use HLS or direct for larger)
-- Does not make private LAN URLs reachable to remote peers
+
+- Origin must support Range for progressive MP4  
+- Each peer must reach the URL (LAN still LAN-only)  
+- Autoplay may require one click in the player window  
+
+## Files
+
+- `background.js` — open/focus player, relay messages  
+- `player.html` / `player.js` — video element + apply sync  
+- `content.js` — page bridge  
+- Site: `apps/web/src/lib/unblock/bridge.ts`
