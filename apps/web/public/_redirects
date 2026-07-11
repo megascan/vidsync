@@ -1,2 +1,0 @@
-# Pretty /r/:code rewrites are handled by src/asset-worker.ts (Workers assets).
-# Do not use a 3xx redirect here — it drops the room code from the URL.

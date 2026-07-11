@@ -529,10 +529,17 @@ button.sm {
 .people li {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   padding: 5px 0;
   font-size: 0.88rem;
+}
+
+.people li > span:not(.os-badge):not(.tag) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .people .you {
@@ -543,6 +550,129 @@ button.sm {
   font-size: 0.68rem;
   color: var(--accent);
   font-weight: 600;
+  margin-left: auto;
+}
+
+.os-badge {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--elevated-2);
+  line-height: 1.2;
+}
+
+.os-badge.os-win {
+  color: #7eb6ff;
+  border-color: color-mix(in srgb, #7eb6ff 35%, var(--border));
+}
+.os-badge.os-lin {
+  color: #f0c674;
+  border-color: color-mix(in srgb, #f0c674 35%, var(--border));
+}
+.os-badge.os-mac {
+  color: #c4b5fd;
+  border-color: color-mix(in srgb, #c4b5fd 35%, var(--border));
+}
+.os-badge.os-web {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+/* ——— Settings ——— */
+.settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px 24px;
+  max-width: 640px;
+}
+
+.settings-block h2 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.settings-block .lede-sm {
+  margin: 0 0 12px;
+  font-size: 0.88rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.ff-status {
+  margin: 0 0 12px;
+  font-size: 0.8rem;
+  font-family: var(--mono);
+  color: var(--faint);
+}
+
+.ff-status.ok {
+  color: var(--accent);
+}
+.ff-status.bad {
+  color: var(--danger);
+}
+
+label.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+label.check input {
+  margin-top: 3px;
+  width: auto;
+}
+
+.settings .field {
+  margin-bottom: 10px;
+}
+
+.settings textarea,
+.settings select {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.7rem;
+  width: 100%;
+  outline: none;
+}
+
+.settings textarea {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 3.5rem;
+}
+
+.settings .hint {
+  margin: 4px 0 14px;
+  font-size: 0.78rem;
+  color: var(--faint);
+}
+
+.settings .hint code {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .queue {

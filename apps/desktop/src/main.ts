@@ -10,6 +10,21 @@ type Member = {
   sessionId: string;
   nickname: string;
   isHost: boolean;
+  platform?: "windows" | "linux" | "macos" | "web" | "unknown" | string;
+};
+
+type MediaSettings = {
+  enabled: boolean;
+  ffmpegPath: string;
+  mode: string;
+  remuxArgs: string;
+  transcodeArgs: string;
+};
+
+type FfmpegStatus = {
+  available: boolean;
+  path: string | null;
+  versionLine: string | null;
 };
 
 type PlaybackState = {
@@ -85,9 +100,14 @@ let chat: { nick: string; text: string }[] = [];
 let status = "";
 let error = "";
 let streamInfo: ServeInfo | null = null;
-let screen: "home" | "room" = "home";
+let screen: "home" | "room" | "settings" = "home";
+/** Where Settings “Back” returns. */
+let settingsReturn: "home" | "room" = "home";
 let joinCode = "";
 let busy = false;
+let mediaSettings: MediaSettings | null = null;
+let ffmpegInfo: FfmpegStatus | null = null;
+let prepareStatus = "";
 let clockOffsetMs = 0;
 let applyingRemote = false;
 let lastVersion = -1;
@@ -691,7 +711,8 @@ async function doStreamFile() {
   const path = await pickVideoFile();
   if (!path) return;
   busy = true;
-  setStatus("Opening video…");
+  prepareStatus = "";
+  setStatus("Preparing video…");
   try {
     const info = await invoke<ServeInfo>("stream_start", {
       path,
@@ -699,7 +720,7 @@ async function doStreamFile() {
       upnp: USE_UPNP,
     });
     streamInfo = info;
-    // Local play immediately (state event follows)
+    prepareStatus = "";
     applyingRemote = true;
     try {
       await loadVideoSrc(info.publicUrl ?? info.lanUrl);
@@ -709,6 +730,7 @@ async function doStreamFile() {
     }
     toast(info.fileName);
   } catch (e) {
+    prepareStatus = "";
     setError(friendlyErr(e));
   } finally {
     busy = false;
@@ -722,17 +744,103 @@ async function doQueueAdd() {
   const path = await pickVideoFile();
   if (!path) return;
   busy = true;
-  setStatus("Adding…");
+  prepareStatus = "";
+  setStatus("Preparing video…");
   try {
     const info = await invoke<ServeInfo>("queue_add_file", { path });
     streamInfo = info;
+    prepareStatus = "";
     toast(`Queued ${info.fileName}`);
   } catch (e) {
+    prepareStatus = "";
     setError(friendlyErr(e));
   } finally {
     busy = false;
     paint();
   }
+}
+
+async function openSettings() {
+  settingsReturn = screen === "room" ? "room" : "home";
+  try {
+    mediaSettings = await invoke<MediaSettings>("get_media_settings");
+    ffmpegInfo = await invoke<FfmpegStatus>("ffmpeg_status");
+  } catch (e) {
+    setError(friendlyErr(e));
+    return;
+  }
+  screen = "settings";
+  paint();
+}
+
+function readSettingsForm(): MediaSettings | null {
+  const enabled = app.querySelector<HTMLInputElement>("#setEnabled");
+  const path = app.querySelector<HTMLInputElement>("#setFfmpeg");
+  const mode = app.querySelector<HTMLSelectElement>("#setMode");
+  const remux = app.querySelector<HTMLTextAreaElement>("#setRemux");
+  const trans = app.querySelector<HTMLTextAreaElement>("#setTranscode");
+  if (!enabled || !path || !mode || !remux || !trans) return null;
+  return {
+    enabled: enabled.checked,
+    ffmpegPath: path.value.trim(),
+    mode: mode.value,
+    remuxArgs: remux.value.trim(),
+    transcodeArgs: trans.value.trim(),
+  };
+}
+
+async function saveSettingsFromForm() {
+  const s = readSettingsForm();
+  if (!s) return;
+  try {
+    await invoke("set_media_settings", { settings: s });
+    mediaSettings = s;
+    ffmpegInfo = await invoke<FfmpegStatus>("ffmpeg_status");
+    toast("Settings saved");
+    paint();
+  } catch (e) {
+    setError(friendlyErr(e));
+  }
+}
+
+async function resetSettingsArgs() {
+  try {
+    const d = await invoke<MediaSettings>("default_media_settings");
+    const cur = readSettingsForm() ?? mediaSettings ?? d;
+    mediaSettings = {
+      ...cur,
+      remuxArgs: d.remuxArgs,
+      transcodeArgs: d.transcodeArgs,
+      mode: d.mode,
+      enabled: d.enabled,
+    };
+    paint();
+    toast("Restored default args");
+  } catch (e) {
+    setError(friendlyErr(e));
+  }
+}
+
+async function clearMediaCache() {
+  try {
+    const n = await invoke<number>("clear_media_cache");
+    toast(`Cleared ${n} cached file(s)`);
+  } catch (e) {
+    setError(friendlyErr(e));
+  }
+}
+
+function platformBadge(platform?: string): string {
+  const p = (platform || "unknown").toLowerCase();
+  const map: Record<string, { label: string; cls: string; title: string }> = {
+    windows: { label: "Win", cls: "os-win", title: "Windows" },
+    linux: { label: "Lin", cls: "os-lin", title: "Linux" },
+    macos: { label: "Mac", cls: "os-mac", title: "macOS" },
+    web: { label: "Web", cls: "os-web", title: "Web" },
+    unknown: { label: "?", cls: "os-unk", title: "Unknown" },
+  };
+  const m = map[p] ?? map.unknown;
+  return `<span class="os-badge ${m.cls}" title="${escapeAttr(m.title)}">${m.label}</span>`;
 }
 
 async function doQueuePlay(index: number) {
@@ -947,6 +1055,22 @@ function bindUiOnce() {
       case "leave":
         void doLeave();
         break;
+      case "openSettings":
+        void openSettings();
+        break;
+      case "settingsBack":
+        screen = settingsReturn;
+        paint();
+        break;
+      case "settingsSave":
+        void saveSettingsFromForm();
+        break;
+      case "settingsResetArgs":
+        void resetSettingsArgs();
+        break;
+      case "settingsClearCache":
+        void clearMediaCache();
+        break;
       case "copyCode":
         copy(roomCode);
         break;
@@ -997,7 +1121,14 @@ function bindUiOnce() {
 
   app.addEventListener("input", (e) => {
     const el = e.target;
-    if (!(el instanceof HTMLInputElement)) return;
+    if (el instanceof HTMLTextAreaElement) {
+      if (el.id === "setRemux" || el.id === "setTranscode" || el.id === "setFfmpeg") {
+        /* live form — saved on button */
+      }
+      return;
+    }
+    if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLSelectElement))
+      return;
     if (el.id === "nick") {
       nick = el.value;
       const create = app.querySelector<HTMLButtonElement>("#create");
@@ -1009,6 +1140,15 @@ function bindUiOnce() {
       if (joinBtn) joinBtn.disabled = busy || joinCode.trim().length < 6;
     } else if (el.id === "chat") {
       chatDraft = el.value;
+    }
+  });
+
+  app.addEventListener("change", (e) => {
+    const el = e.target;
+    if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLSelectElement))
+      return;
+    if (el.id === "setEnabled" || el.id === "setMode") {
+      /* form fields */
     }
   });
 
@@ -1030,6 +1170,11 @@ function bindUiOnce() {
 }
 
 function paint() {
+  if (screen === "settings") {
+    paintSettings();
+    return;
+  }
+
   if (screen === "home") {
     const flash = error
       ? `<p class="flash err" data-flash>${escapeHtml(error)}</p>`
@@ -1071,6 +1216,7 @@ function paint() {
                 Join
               </button>
             </div>
+            <button type="button" class="ghost" id="openSettings">Settings</button>
             ${flash}
           </div>
         </div>
@@ -1092,9 +1238,11 @@ function paint() {
 
   const flashBar = error
     ? `<span class="bar-meta err">${escapeHtml(error)}</span>`
-    : status
-      ? `<span class="bar-meta">${escapeHtml(status)}</span>`
-      : "";
+    : prepareStatus
+      ? `<span class="bar-meta">${escapeHtml(prepareStatus)}</span>`
+      : status
+        ? `<span class="bar-meta">${escapeHtml(status)}</span>`
+        : "";
 
   // CRITICAL: detach <video> before thrashing innerHTML. WebKitGTK crashes when a
   // playing/loading media element is destroyed as a descendant of replaced markup
@@ -1112,6 +1260,7 @@ function paint() {
           <span class="pill ${isHost ? "host" : "viewer"}">${isHost ? "Host" : "Watching"}</span>
         </div>
         <div class="header-actions">
+          <button type="button" class="ghost" id="openSettings">Settings</button>
           <button type="button" class="ghost" id="copyCode">Copy code</button>
           <button type="button" class="ghost" id="leave">Leave</button>
         </div>
@@ -1161,6 +1310,7 @@ function paint() {
                   .map((m) => {
                     const you = m.sessionId === sessionId;
                     return `<li>
+                      ${platformBadge(m.platform)}
                       <span class="${you ? "you" : ""}">${escapeHtml(m.nickname)}${you ? " (you)" : ""}</span>
                       ${m.isHost ? `<span class="tag">host</span>` : ""}
                     </li>`;
@@ -1246,6 +1396,73 @@ function escapeAttr(s: string): string {
   return escapeHtml(s).replace(/'/g, "&#39;");
 }
 
+function paintSettings() {
+  const s =
+    mediaSettings ??
+    ({
+      enabled: true,
+      ffmpegPath: "",
+      mode: "auto",
+      remuxArgs: "",
+      transcodeArgs: "",
+    } satisfies MediaSettings);
+  const ff = ffmpegInfo;
+  const ffLine = ff?.available
+    ? `Found: ${escapeHtml(ff.versionLine || ff.path || "ffmpeg")}`
+    : "FFmpeg not found on PATH — install it or set path below";
+
+  const mode = s.mode || "auto";
+  app.innerHTML = `
+    <div class="screen settings">
+      <header class="room-header">
+        <div class="room-id"><strong>Settings</strong></div>
+        <div class="header-actions">
+          <button type="button" class="ghost" id="settingsBack">Back</button>
+        </div>
+      </header>
+      <div class="settings-body">
+        <section class="settings-block">
+          <h2>Host media (FFmpeg)</h2>
+          <p class="lede-sm">When you open a local file, the host can remux or transcode to H.264/AAC for max client compatibility. Viewers never run FFmpeg.</p>
+          <p class="ff-status ${ff?.available ? "ok" : "bad"}">${ffLine}</p>
+          <label class="check">
+            <input type="checkbox" id="setEnabled" ${s.enabled ? "checked" : ""} />
+            <span>Prepare media with FFmpeg before sharing</span>
+          </label>
+          <label class="field">
+            <span>FFmpeg path (optional)</span>
+            <input id="setFfmpeg" type="text" spellcheck="false"
+              placeholder="empty = search PATH"
+              value="${escapeAttr(s.ffmpegPath)}" />
+          </label>
+          <label class="field">
+            <span>Mode</span>
+            <select id="setMode">
+              <option value="auto" ${mode === "auto" ? "selected" : ""}>Auto (remux if possible, else high-quality encode)</option>
+              <option value="remux" ${mode === "remux" ? "selected" : ""}>Always remux (stream copy, no quality loss)</option>
+              <option value="transcode" ${mode === "transcode" ? "selected" : ""}>Always transcode (H.264 + AAC)</option>
+              <option value="off" ${mode === "off" ? "selected" : ""}>Off — serve original file</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Remux args (lossless copy)</span>
+            <textarea id="setRemux" rows="3" spellcheck="false">${escapeHtml(s.remuxArgs)}</textarea>
+          </label>
+          <label class="field">
+            <span>Transcode args (compatible, high quality)</span>
+            <textarea id="setTranscode" rows="4" spellcheck="false">${escapeHtml(s.transcodeArgs)}</textarea>
+          </label>
+          <p class="hint">Command shape: <code>ffmpeg -y -i INPUT …args… OUTPUT.mp4</code>. Defaults keep quality (copy / CRF 18) and strip junk tracks (tmcd, subs).</p>
+          <div class="settings-actions">
+            <button type="button" class="primary" id="settingsSave">Save</button>
+            <button type="button" id="settingsResetArgs">Reset defaults</button>
+            <button type="button" class="ghost" id="settingsClearCache">Clear media cache</button>
+          </div>
+        </section>
+      </div>
+    </div>`;
+}
+
 async function boot() {
   bindUiOnce();
   wireVideoHostEvents();
@@ -1262,8 +1479,24 @@ async function boot() {
   await listen("sync-event", (e) => {
     void onSync(e.payload);
   });
+  await listen("media-prepare", (e) => {
+    const p = e.payload as {
+      phase?: string;
+      message?: string;
+      pct?: number | null;
+    };
+    const pct =
+      p.pct != null && Number.isFinite(p.pct) ? ` ${p.pct}%` : "";
+    prepareStatus = `${p.message || p.phase || "Working…"}${pct}`;
+    const el = app.querySelector(".bar-meta");
+    if (el && !error) {
+      el.textContent = prepareStatus;
+    } else if (busy) {
+      status = prepareStatus;
+      paint();
+    }
+  });
   paint();
-  // Non-blocking; banner paints when update found
   void checkForUpdates();
 }
 

@@ -21,6 +21,8 @@ type SessionAttachment = {
   joinedAtMs: number;
   helloDone: boolean;
   lastChatMs?: number;
+  /** windows | linux | macos | web | unknown */
+  platform?: string;
 };
 
 type StoredRoom = {
@@ -324,6 +326,9 @@ export class Room extends DurableObject<Env> {
     if (msg.type === "hello") {
       if (msg.nickname) {
         session.nickname = msg.nickname;
+      }
+      if (msg.platform) {
+        session.platform = msg.platform;
       }
       session.helloDone = true;
       ws.serializeAttachment(session);
@@ -778,6 +783,11 @@ export class Room extends DurableObject<Env> {
         sessionId: session.sessionId,
         nickname: session.nickname,
         isHost: session.sessionId === hostId,
+        ...(session.platform
+          ? {
+              platform: session.platform as Member["platform"],
+            }
+          : {}),
       });
     }
     list.sort((a, b) => a.nickname.localeCompare(b.nickname));

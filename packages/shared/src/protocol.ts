@@ -78,10 +78,22 @@ export const playbackStateSchema = z.object({
 
 export type PlaybackState = z.infer<typeof playbackStateSchema>;
 
+/** Client OS / surface for presence badges. */
+export const clientPlatformSchema = z.enum([
+  "windows",
+  "linux",
+  "macos",
+  "web",
+  "unknown",
+]);
+export type ClientPlatform = z.infer<typeof clientPlatformSchema>;
+
 export const memberSchema = z.object({
   sessionId: z.string(),
   nickname: z.string(),
   isHost: z.boolean(),
+  /** Optional for older clients. */
+  platform: clientPlatformSchema.optional(),
 });
 
 export type Member = z.infer<typeof memberSchema>;
@@ -91,6 +103,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("hello"),
     nickname: nicknameSchema.optional(),
     clientTimeMs: z.number().int().nonnegative(),
+    platform: clientPlatformSchema.optional(),
   }),
   z.object({
     type: z.literal("set_url"),

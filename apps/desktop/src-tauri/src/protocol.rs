@@ -27,6 +27,8 @@ pub struct Member {
     pub session_id: String,
     pub nickname: String,
     pub is_host: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +48,8 @@ pub enum ClientMessage {
         nickname: Option<String>,
         #[serde(rename = "clientTimeMs")]
         client_time_ms: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
     },
     /// Add URL and switch to it (also appends to queue if new).
     SetUrl {

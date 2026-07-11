@@ -33,4 +33,7 @@ export type {
   ClientMessage,
   ServerMessage,
   CreateRoomBody,
+  ClientPlatform,
 } from "./protocol";
+
+export { clientPlatformSchema } from "./protocol";

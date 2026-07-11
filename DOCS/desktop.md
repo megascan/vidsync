@@ -53,8 +53,7 @@ UI invokes `room_create`, `room_join`, `stream_start`, `host_play`, …
 
 ## Legacy
 
-- `apps/host` — earlier egui experiments  
-- `apps/web` + `extensions/` — browser path  
+- `apps/host` — earlier egui experiments (superseded by this app)
 
 ## Platforms
 
@@ -108,3 +107,27 @@ Extra tracks (e.g. QuickTime **tmcd** timecode) can confuse demuxers. Remux clea
 ```bash
 ffmpeg -i in.mp4 -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart out.mp4
 ```
+
+### Host FFmpeg prepare (Settings)
+
+Host-only. Viewers never run FFmpeg.
+
+| Mode | Behavior |
+|---|---|
+| **Auto** (default) | Remux (stream copy) when codecs OK; else high-quality H.264/AAC |
+| **Remux** | Always `-c copy` (no quality loss) |
+| **Transcode** | Always re-encode CRF 18 H.264 + AAC |
+| **Off** | Serve original path |
+
+Requires `ffmpeg` + `ffprobe` on PATH (or set path in Settings).  
+Cached under OS config dir `vidsync/media-cache/`.
+
+Default args (editable):
+
+- Remux: `-map 0:v:0 -map 0:a:0? -c copy -movflags +faststart -sn -dn`
+- Transcode: libx264 CRF 18, yuv420p, AAC 192k, faststart, strip subs/data
+
+### Presence OS badges
+
+Hello sends `platform` (`windows` \| `linux` \| `macos` \| `web`).  
+Members list shows Win / Lin / Mac / Web chips.

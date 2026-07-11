@@ -222,6 +222,7 @@ async fn run_session(
     let hello = ClientMessage::Hello {
         nickname: Some(nickname.to_string()),
         client_time_ms: chrono_now(),
+        platform: Some(host_platform().into()),
     };
     match serde_json::to_string(&hello) {
         Ok(hello_txt) => {
@@ -360,6 +361,18 @@ fn chrono_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn host_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    }
 }
 
 /// Join existing room code.

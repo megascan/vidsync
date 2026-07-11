@@ -1,6 +1,8 @@
 //! VidSync Tauri backend — room sync, multi-file media hub, events to UI.
 
 mod api;
+mod ffmpeg;
+mod media_settings;
 mod net;
 mod protocol;
 mod server;
@@ -93,7 +95,7 @@ fn send_msg(state: &AppState, msg: ClientMessage) -> Result<(), String> {
 }
 
 /// Register local file on the hub and return share URL.
-async fn register_file(state: &AppState, path: String) -> Result<ServeInfo, String> {
+async fn register_file(state: &AppState, path: PathBuf) -> Result<ServeInfo, String> {
     let mut hub = state.hub.lock().await;
     if hub.is_none() {
         let started = MediaHub::start(DEFAULT_PORT, true)
@@ -101,12 +103,25 @@ async fn register_file(state: &AppState, path: String) -> Result<ServeInfo, Stri
             .map_err(|e| format!("{e:#}"))?;
         *hub = Some(started);
     }
-    let path = PathBuf::from(path);
     hub.as_ref()
         .ok_or_else(|| "media hub not ready".to_string())?
         .add_file(path)
         .await
         .map_err(|e| format!("{e:#}"))
+}
+
+/// Optional FFmpeg prepare then register.
+async fn prepare_and_register(
+    app: &AppHandle,
+    state: &AppState,
+    path: String,
+) -> Result<ServeInfo, String> {
+    let input = PathBuf::from(&path);
+    let settings = media_settings::load();
+    let serve_path = ffmpeg::prepare_for_host(app, input, &settings)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    register_file(state, serve_path).await
 }
 
 #[tauri::command]
@@ -206,9 +221,10 @@ fn host_heartbeat(
     )
 }
 
-/// Open a local file: register on hub, add to room queue, switch everyone to it.
+/// Open a local file: optional FFmpeg prepare, hub register, switch room.
 #[tauri::command]
 async fn stream_start(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
     #[allow(unused_variables)] port: u16,
@@ -217,9 +233,8 @@ async fn stream_start(
     if !state.is_host.lock().map(|x| *x).unwrap_or(false) {
         return Err("only host can open videos".into());
     }
-    let info = register_file(&state, path).await?;
+    let info = prepare_and_register(&app, &state, path).await?;
     let url = info.primary_url().to_string();
-    // set_url appends if new and switches current
     send_msg(&state, ClientMessage::SetUrl { url })?;
     session::try_clipboard(info.primary_url());
     Ok(info)
@@ -227,11 +242,15 @@ async fn stream_start(
 
 /// Register file and append to queue without forcing a switch.
 #[tauri::command]
-async fn queue_add_file(state: State<'_, AppState>, path: String) -> Result<ServeInfo, String> {
+async fn queue_add_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ServeInfo, String> {
     if !state.is_host.lock().map(|x| *x).unwrap_or(false) {
         return Err("only host can queue videos".into());
     }
-    let info = register_file(&state, path).await?;
+    let info = prepare_and_register(&app, &state, path).await?;
     let url = info.primary_url().to_string();
     send_msg(
         &state,
@@ -241,6 +260,41 @@ async fn queue_add_file(state: State<'_, AppState>, path: String) -> Result<Serv
         },
     )?;
     Ok(info)
+}
+
+#[tauri::command]
+fn get_media_settings() -> media_settings::MediaSettings {
+    media_settings::load()
+}
+
+#[tauri::command]
+fn set_media_settings(settings: media_settings::MediaSettings) -> Result<(), String> {
+    media_settings::save(&settings)
+}
+
+#[tauri::command]
+fn default_media_settings() -> media_settings::MediaSettings {
+    media_settings::MediaSettings::default()
+}
+
+#[tauri::command]
+async fn ffmpeg_status() -> ffmpeg::FfmpegStatus {
+    let s = media_settings::load();
+    ffmpeg::status(&s).await
+}
+
+#[tauri::command]
+fn clear_media_cache() -> Result<u32, String> {
+    let dir = media_settings::cache_dir();
+    let mut n = 0u32;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            if e.path().is_file() && std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
 }
 
 #[tauri::command]
@@ -315,6 +369,11 @@ pub fn run() {
             queue_remove,
             queue_clear,
             stream_stop,
+            get_media_settings,
+            set_media_settings,
+            default_media_settings,
+            ffmpeg_status,
+            clear_media_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
