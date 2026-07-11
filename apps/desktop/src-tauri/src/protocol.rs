@@ -50,6 +50,9 @@ pub enum ClientMessage {
         client_time_ms: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        /// Process-stable id so DO can replace ghost sockets on rejoin/reconnect.
+        #[serde(rename = "clientKey", skip_serializing_if = "Option::is_none")]
+        client_key: Option<String>,
     },
     /// Add URL and switch to it (also appends to queue if new).
     SetUrl {

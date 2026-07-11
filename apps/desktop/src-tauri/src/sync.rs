@@ -78,17 +78,44 @@ enum SessionEnd {
     Dropped { reason: String, welcomed: bool },
 }
 
+/// One key per desktop process — sent on hello so the room DO can drop ghost
+/// sockets from leave/rejoin or auto-reconnect races.
+fn client_instance_key() -> String {
+    use std::sync::OnceLock;
+    static KEY: OnceLock<String> = OnceLock::new();
+    KEY.get_or_init(|| {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let r: u32 = rand::random();
+        format!("d{t:x}{r:08x}")
+    })
+    .clone()
+}
+
 pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (out_tx, out_rx) = mpsc::unbounded_channel::<ClientMessage>();
     let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel::<()>();
+    let client_key = client_instance_key();
 
     let (ws, _) = connect_async(&ws_url)
         .await
         .with_context(|| format!("ws connect {ws_url}"))?;
 
     tokio::spawn(async move {
-        run_reconnect_loop(ws_url, nickname, Some(ws), out_rx, shutdown_rx, event_tx).await;
+        run_reconnect_loop(
+            ws_url,
+            nickname,
+            client_key,
+            Some(ws),
+            out_rx,
+            shutdown_rx,
+            event_tx,
+        )
+        .await;
     });
 
     Ok(SyncHandle {
@@ -101,6 +128,7 @@ pub async fn connect(ws_url: String, nickname: String) -> Result<SyncHandle> {
 async fn run_reconnect_loop(
     ws_url: String,
     nickname: String,
+    client_key: String,
     mut primed: Option<WsStream>,
     mut out_rx: mpsc::UnboundedReceiver<ClientMessage>,
     mut shutdown_rx: mpsc::UnboundedReceiver<()>,
@@ -142,7 +170,16 @@ async fn run_reconnect_loop(
             }
         };
 
-        match run_session(ws, &nickname, &mut out_rx, &mut shutdown_rx, &event_tx).await {
+        match run_session(
+            ws,
+            &nickname,
+            &client_key,
+            &mut out_rx,
+            &mut shutdown_rx,
+            &event_tx,
+        )
+        .await
+        {
             SessionEnd::UserShutdown => {
                 let _ = event_tx.send(SyncEvent::Disconnected {
                     reason: "closed".into(),
@@ -210,6 +247,7 @@ fn reconnect_delay_ms(attempt: u32) -> u64 {
 async fn run_session(
     ws: WsStream,
     nickname: &str,
+    client_key: &str,
     out_rx: &mut mpsc::UnboundedReceiver<ClientMessage>,
     shutdown_rx: &mut mpsc::UnboundedReceiver<()>,
     event_tx: &mpsc::UnboundedSender<SyncEvent>,
@@ -224,6 +262,7 @@ async fn run_session(
         nickname: Some(nickname.to_string()),
         client_time_ms: chrono_now(),
         platform: Some(host_platform().into()),
+        client_key: Some(client_key.to_string()),
     };
     match serde_json::to_string(&hello) {
         Ok(hello_txt) => {

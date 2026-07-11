@@ -107,6 +107,17 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     nickname: nicknameSchema.optional(),
     clientTimeMs: z.number().int().nonnegative(),
     platform: clientPlatformSchema.optional(),
+    /**
+     * Stable per app process (desktop). DO kicks older sockets with the same
+     * key so leave/rejoin or reconnect doesn't leave duplicate members.
+     */
+    clientKey: z
+      .string()
+      .trim()
+      .min(8)
+      .max(64)
+      .regex(/^[A-Za-z0-9_-]+$/)
+      .optional(),
   }),
   z.object({
     type: z.literal("set_url"),

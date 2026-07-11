@@ -23,6 +23,11 @@ type SessionAttachment = {
   lastChatMs?: number;
   /** windows | linux | macos | web | unknown */
   platform?: string;
+  /**
+   * Desktop process id from hello. Same key on rejoin/reconnect → kick old
+   * sockets so the people list doesn't stack duplicates.
+   */
+  clientKey?: string;
 };
 
 type StoredRoom = {
@@ -351,11 +356,21 @@ export class Room extends DurableObject<Env> {
       if (msg.platform) {
         session.platform = msg.platform;
       }
+      if (msg.clientKey) {
+        session.clientKey = msg.clientKey;
+      }
       session.helloDone = true;
       ws.serializeAttachment(session);
       this.sessions.set(ws, session);
 
       const now = Date.now();
+
+      // Same desktop process re-hello'd (leave/rejoin race or auto-reconnect):
+      // drop older sockets so they don't show as duplicate members.
+      if (session.clientKey) {
+        await this.kickSessionsWithClientKey(ws, session);
+      }
+
       // Claim host if none / dead host (reconnect after DO drop).
       if (!this.room.state.hostSessionId || !this.isHostLive()) {
         this.room.state = {
@@ -820,6 +835,65 @@ export class Room extends DurableObject<Env> {
     }
     list.sort((a, b) => a.nickname.localeCompare(b.nickname));
     return list;
+  }
+
+  /**
+   * Close every other socket that presented the same clientKey. Transfer host
+   * ownership to the surviving session when the ghost was host.
+   */
+  private async kickSessionsWithClientKey(
+    keep: WebSocket,
+    keepSession: SessionAttachment,
+  ): Promise<void> {
+    if (!this.room || !keepSession.clientKey) return;
+    this.rebuildSessionsFromHibernation();
+
+    const key = keepSession.clientKey;
+    const doomed: WebSocket[] = [];
+    let hostWasGhost = false;
+
+    for (const [ows, os] of this.sessions) {
+      if (ows === keep) continue;
+      if (os.clientKey !== key) continue;
+      if (this.room.state.hostSessionId === os.sessionId) {
+        hostWasGhost = true;
+      }
+      doomed.push(ows);
+    }
+
+    // Hibernated sockets may not be in the map yet
+    for (const ows of this.ctx.getWebSockets()) {
+      if (ows === keep || doomed.includes(ows)) continue;
+      const att = this.attachmentOf(ows);
+      if (!att || att.clientKey !== key) continue;
+      if (this.room.state.hostSessionId === att.sessionId) {
+        hostWasGhost = true;
+      }
+      doomed.push(ows);
+    }
+
+    for (const ows of doomed) {
+      this.sessions.delete(ows);
+      try {
+        ows.close(4000, "replaced");
+      } catch {
+        // already closed
+      }
+    }
+
+    if (hostWasGhost || doomed.length > 0) {
+      if (hostWasGhost) {
+        this.room.state = {
+          ...this.room.state,
+          hostSessionId: keepSession.sessionId,
+          version: this.room.state.version + 1,
+          updatedAtMs: Date.now(),
+        };
+        this.room.hostGoneAtMs = null;
+        this.room.lastHostActivityAtMs = Date.now();
+      }
+      await this.persist();
+    }
   }
 
   private liveMemberCount(): number {

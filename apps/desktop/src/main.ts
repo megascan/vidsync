@@ -438,8 +438,13 @@ function tokenFromUrl(url: string): string {
   }
 }
 
-/** Put video in the room shell if it exists (no-op on home). */
+/**
+ * Put video in the room shell when there is media. Never call while idle —
+ * softPaint used to always mount a blank <video>, which ate the empty state
+ * and left native controls with nothing to play.
+ */
 function ensureVideoMounted() {
+  if (!hasMedia()) return;
   const mount = app.querySelector("#videoMount");
   if (!mount) return;
   mount.querySelector(".video-empty")?.remove();
@@ -447,6 +452,40 @@ function ensureVideoMounted() {
     mount.appendChild(video);
   }
 }
+
+/** Host player controls — rebuilt on soft paint when role / media changes. */
+function hostPlayerBarHtml(): string {
+  const media = hasMedia();
+  return `
+    <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>Play media…</button>
+    <button type="button" id="queueAdd" ${busy ? "disabled" : ""}>Add to queue</button>
+    <button type="button" id="play" ${!media || busy ? "disabled" : ""}>Play</button>
+    <button type="button" id="pause" ${!media || busy ? "disabled" : ""}>Pause</button>
+    <span class="spacer"></span>
+    <span class="bar-meta" data-flash-bar></span>
+  `;
+}
+
+function viewerPlayerBarHtml(): string {
+  const media = hasMedia();
+  return `
+    <span class="bar-meta" data-flash-bar>${media ? "Synced to host" : "Waiting…"}</span>
+    <span class="spacer"></span>
+  `;
+}
+
+function flashBarText(): { text: string; err: boolean } {
+  if (error) return { text: error, err: true };
+  if (prepareStatus) return { text: prepareStatus, err: false };
+  if (status) return { text: status, err: false };
+  if (!isHost) {
+    return { text: hasMedia() ? "Synced to host" : "Waiting…", err: false };
+  }
+  return { text: "", err: false };
+}
+
+/** Last role used to build the room shell (detect host flip for full rebuild). */
+let shellIsHost: boolean | null = null;
 
 /**
  * Hard-reset media element. Always detach-safe: never leave WebKit mid-decode
@@ -838,6 +877,7 @@ async function kickHome(message: string) {
   }
   screen = "home";
   roomShellReady = false;
+  shellIsHost = null;
   roomCode = "";
   isHost = false;
   sessionId = "";
@@ -865,8 +905,9 @@ async function doCreate() {
       apiBase,
     });
     roomCode = code;
-    screen = "room";
-    status = "";
+    // Stay on home until welcome — premature room paint freezes isHost=false
+    // and softPaint never rebuilds Play media / queue buttons.
+    status = "Connecting…";
     error = "";
   } catch (e) {
     setError(friendlyErr(e));
@@ -889,8 +930,8 @@ async function doJoin() {
       apiBase,
     });
     roomCode = code;
-    screen = "room";
-    status = "";
+    // Welcome event switches to room shell with correct isHost
+    status = "Connecting…";
     error = "";
   } catch (e) {
     setError(friendlyErr(e));
@@ -908,6 +949,7 @@ async function doLeave() {
   }
   screen = "home";
   roomShellReady = false;
+  shellIsHost = null;
   roomCode = "";
   isHost = false;
   sessionId = "";
@@ -1449,22 +1491,53 @@ function softPaintRoom() {
     paint();
     return;
   }
-  const flashBar = app.querySelector(".bar-meta");
-  if (flashBar) {
-    if (error) {
-      flashBar.className = "bar-meta err";
-      flashBar.textContent = error;
-    } else if (prepareStatus) {
-      flashBar.className = "bar-meta";
-      flashBar.textContent = prepareStatus;
-    } else if (status) {
-      flashBar.className = "bar-meta";
-      flashBar.textContent = status;
-    } else {
-      flashBar.className = "bar-meta";
-      flashBar.textContent = "";
+
+  // Host role changed after shell built (create/join paints before welcome) —
+  // full rebuild so Play media / Add to queue appear.
+  if (shellIsHost !== isHost) {
+    roomShellReady = false;
+    paint();
+    return;
+  }
+
+  const bar = app.querySelector(".player-bar");
+  if (bar) {
+    // Keep host buttons alive; only rewrite if structure missing
+    const hasStreamBtn = Boolean(bar.querySelector("#stream"));
+    if (isHost && !hasStreamBtn) {
+      bar.innerHTML = hostPlayerBarHtml();
+    } else if (!isHost && hasStreamBtn) {
+      bar.innerHTML = viewerPlayerBarHtml();
+    } else if (isHost) {
+      const play = bar.querySelector<HTMLButtonElement>("#play");
+      const pause = bar.querySelector<HTMLButtonElement>("#pause");
+      const stream = bar.querySelector<HTMLButtonElement>("#stream");
+      const qAdd = bar.querySelector<HTMLButtonElement>("#queueAdd");
+      const media = hasMedia();
+      if (play) play.disabled = !media || busy;
+      if (pause) pause.disabled = !media || busy;
+      if (stream) stream.disabled = busy;
+      if (qAdd) qAdd.disabled = busy;
     }
   }
+
+  const flash = flashBarText();
+  const flashBar =
+    app.querySelector("[data-flash-bar]") ?? app.querySelector(".bar-meta");
+  if (flashBar) {
+    flashBar.className = flash.err ? "bar-meta err" : "bar-meta";
+    flashBar.setAttribute("data-flash-bar", "");
+    // Host: only show status/error in the meta slot; empty is fine
+    if (isHost || flash.text) {
+      flashBar.textContent = flash.text;
+    }
+  }
+
+  const peopleTitle = app.querySelector(".panel-title");
+  if (peopleTitle && peopleTitle.textContent?.startsWith("People")) {
+    peopleTitle.textContent = `People · ${members.length}`;
+  }
+
   const people = app.querySelector(".people");
   if (people) {
     people.innerHTML =
@@ -1500,8 +1573,23 @@ function softPaintRoom() {
           </li>`;
         })
         .join("") ||
-      `<li class="empty" style="color:var(--faint)">${isHost ? "Add videos with Play file or Add to queue" : "Empty"}</li>`;
+      `<li class="empty" style="color:var(--faint)">${isHost ? "Add videos with Play media or Add to queue" : "Empty"}</li>`;
   }
+
+  const qHead = app.querySelector(".panel-head");
+  if (qHead) {
+    const clear = qHead.querySelector("#queueClear");
+    const wantClear = isHost && (playback?.queue?.length ?? 0) > 0;
+    if (wantClear && !clear) {
+      qHead.insertAdjacentHTML(
+        "beforeend",
+        `<button type="button" class="ghost sm" id="queueClear">Clear</button>`,
+      );
+    } else if (!wantClear && clear) {
+      clear.remove();
+    }
+  }
+
   const chatLog = app.querySelector("#chatLog");
   if (chatLog) {
     chatLog.innerHTML =
@@ -1518,7 +1606,33 @@ function softPaintRoom() {
     pill.className = `pill ${isHost ? "host" : "viewer"}`;
     pill.textContent = isHost ? "Host" : "Watching";
   }
-  ensureVideoMounted();
+
+  const mount = app.querySelector("#videoMount");
+  if (mount) {
+    if (hasMedia()) {
+      ensureVideoMounted();
+    } else {
+      // Detach blank video + restore empty copy if soft-path wiped it
+      if (video.parentElement === mount) {
+        video.remove();
+      }
+      if (!mount.querySelector(".video-empty")) {
+        const emptyCopy = isHost
+          ? {
+              title: "Nothing playing",
+              body: "Open a video or audio file to start the room.",
+            }
+          : {
+              title: "Waiting for host",
+              body: "Media shows up here when they start streaming.",
+            };
+        mount.innerHTML = `<div class="video-empty">
+          <strong>${escapeHtml(emptyCopy.title)}</strong>
+          <span>${escapeHtml(emptyCopy.body)}</span>
+        </div>`;
+      }
+    }
+  }
 }
 
 function paint() {
@@ -1578,9 +1692,11 @@ function paint() {
     return;
   }
 
+
   // Soft path: room chrome already built — don't reparent <video>
   if (
     roomShellReady &&
+    shellIsHost === isHost &&
     app.querySelector(".room-layout") &&
     app.querySelector("#videoMount")
   ) {
@@ -1600,13 +1716,10 @@ function paint() {
         body: "Media shows up here when they start streaming.",
       };
 
-  const flashBar = error
-    ? `<span class="bar-meta err">${escapeHtml(error)}</span>`
-    : prepareStatus
-      ? `<span class="bar-meta">${escapeHtml(prepareStatus)}</span>`
-      : status
-        ? `<span class="bar-meta">${escapeHtml(status)}</span>`
-        : "";
+  const flash = flashBarText();
+  const flashSlot = flash.text
+    ? `<span class="bar-meta${flash.err ? " err" : ""}" data-flash-bar>${escapeHtml(flash.text)}</span>`
+    : `<span class="bar-meta" data-flash-bar></span>`;
 
   // CRITICAL: detach <video> before thrashing innerHTML. WebKitGTK crashes when a
   // playing/loading media element is destroyed as a descendant of replaced markup
@@ -1649,11 +1762,11 @@ function paint() {
               <button type="button" id="queueAdd" ${busy ? "disabled" : ""}>Add to queue</button>
               <button type="button" id="play" ${!media || busy ? "disabled" : ""}>Play</button>
               <button type="button" id="pause" ${!media || busy ? "disabled" : ""}>Pause</button>
+              <span class="spacer"></span>
+              ${flashSlot}
             `
-                : `<span class="bar-meta">${media ? "Synced to host" : "Waiting…"}</span>`
+                : `${flashSlot}<span class="spacer"></span>`
             }
-            <span class="spacer"></span>
-            ${flashBar}
           </div>
           ${
             streamInfo
@@ -1712,7 +1825,7 @@ function paint() {
                     </li>`;
                   })
                   .join("") ||
-                `<li class="empty" style="color:var(--faint)">${isHost ? "Add videos with Play file or Add to queue" : "Empty"}</li>`
+                `<li class="empty" style="color:var(--faint)">${isHost ? "Add videos with Play media or Add to queue" : "Empty"}</li>`
               }
             </ul>
           </div>
@@ -1747,6 +1860,7 @@ function paint() {
   const log = app.querySelector("#chatLog");
   if (log) log.scrollTop = log.scrollHeight;
   roomShellReady = true;
+  shellIsHost = isHost;
 }
 
 function escapeHtml(s: string): string {
