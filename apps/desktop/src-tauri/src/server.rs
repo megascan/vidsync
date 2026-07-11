@@ -18,6 +18,8 @@ use tokio::sync::RwLock;
 use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
 
+// TraceLayer dropped for smaller binary — enable only if debugging HTTP.
+
 #[derive(Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
