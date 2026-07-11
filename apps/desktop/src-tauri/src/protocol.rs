@@ -121,6 +121,12 @@ pub enum ServerMessage {
         code: String,
         message: String,
     },
+    RoomClosed {
+        reason: String,
+        message: String,
+        #[serde(rename = "serverTimeMs")]
+        server_time_ms: i64,
+    },
 }
 
 pub fn expected_position_ms(state: &PlaybackState, now_ms: i64) -> f64 {

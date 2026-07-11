@@ -53,7 +53,8 @@ type SyncEvent =
         serverTimeMs: number;
       };
     }
-  | { kind: "error"; code: string; message: string };
+  | { kind: "error"; code: string; message: string }
+  | { kind: "room_closed"; reason: string; message: string };
 
 function pick<T>(obj: Record<string, unknown>, ...keys: string[]): T | undefined {
   for (const k of keys) {
@@ -314,6 +315,13 @@ function normalizeEvent(raw: unknown): SyncEvent | null {
       message: String(pick(o, "message") ?? ""),
     };
   }
+  if (kind === "room_closed") {
+    return {
+      kind: "room_closed",
+      reason: String(pick(o, "reason") ?? "destroyed"),
+      message: String(pick(o, "message") ?? "Room closed"),
+    };
+  }
   return null;
 }
 
@@ -355,7 +363,33 @@ async function onSync(raw: unknown) {
     case "error":
       setError(ev.message || ev.code);
       break;
+    case "room_closed":
+      // Host left / room wiped — back to home
+      void kickHome(ev.message || "Room closed");
+      break;
   }
+}
+
+async function kickHome(message: string) {
+  try {
+    await invoke("room_leave");
+  } catch {
+    /* */
+  }
+  screen = "home";
+  roomCode = "";
+  isHost = false;
+  sessionId = "";
+  members = [];
+  playback = null;
+  chat = [];
+  streamInfo = null;
+  video.removeAttribute("src");
+  video.load();
+  busy = false;
+  status = "";
+  error = message;
+  paint();
 }
 
 async function doCreate() {

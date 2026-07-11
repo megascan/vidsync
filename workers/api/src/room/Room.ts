@@ -234,29 +234,19 @@ export class Room extends DurableObject<Env> {
       return;
     }
 
-    let hostChanged = false;
+    // Host left → room dies immediately; everyone kicked
     if (this.room.state.hostSessionId === session.sessionId) {
-      const next = this.oldestLiveSession();
-      this.room.state = {
-        ...this.room.state,
-        hostSessionId: next?.sessionId ?? null,
-        version: this.room.state.version + 1,
-        updatedAtMs: Date.now(),
-      };
-      hostChanged = true;
-      await this.persist();
+      await this.dissolveRoom("host_left", "Host left — room closed");
+      return;
     }
 
     if (this.openConnectionCount() > 0) {
-      if (hostChanged) {
-        this.broadcastState();
-      }
       this.broadcastMembers();
       await this.ctx.storage.deleteAlarm();
       return;
     }
 
-    // Last person left — schedule wipe (short grace for refresh/reconnect)
+    // Last non-host left — short grace then wipe
     await this.scheduleEmptyRoomCleanup();
   }
 
@@ -745,13 +735,45 @@ export class Room extends DurableObject<Env> {
     return Math.max(n, this.sessions.size);
   }
 
-  private oldestLiveSession(): SessionAttachment | null {
-    let best: SessionAttachment | null = null;
-    for (const s of this.sessions.values()) {
-      if (!s.helloDone) continue;
-      if (!best || s.joinedAtMs < best.joinedAtMs) best = s;
+  /**
+   * Notify all clients, close sockets, wipe durable state.
+   * Used when host leaves (no host transfer).
+   */
+  private async dissolveRoom(
+    reason: "host_left" | "empty" | "destroyed",
+    message: string,
+  ): Promise<void> {
+    const msg: ServerMessage = {
+      type: "room_closed",
+      reason,
+      message,
+      serverTimeMs: Date.now(),
+    };
+    const text = JSON.stringify(msg);
+
+    // Prefer in-memory sessions; also hit hibernation sockets
+    const sockets = new Set<WebSocket>([
+      ...this.sessions.keys(),
+      ...this.ctx.getWebSockets(),
+    ]);
+
+    for (const sock of sockets) {
+      try {
+        sock.send(text);
+      } catch {
+        /* */
+      }
+      try {
+        sock.close(4000, reason);
+      } catch {
+        /* */
+      }
     }
-    return best;
+
+    this.sessions.clear();
+    this.room = null;
+    await this.ctx.storage.deleteAll();
+    await this.ctx.storage.deleteAlarm();
   }
 
   private async persist(): Promise<void> {

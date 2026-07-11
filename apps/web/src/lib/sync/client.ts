@@ -128,6 +128,11 @@ export class SyncClient {
         case "error":
           this.handlers.onError(msg.code, msg.message);
           break;
+        case "room_closed":
+          this.closedByUser = true; // do not reconnect — room is gone
+          this.handlers.onError(msg.reason, msg.message);
+          this.ws?.close(1000, "room_closed");
+          break;
       }
     };
 

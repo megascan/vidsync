@@ -8,11 +8,10 @@ export const MAX_QUEUE_LENGTH = 50;
 export const MAX_CHAT_LENGTH = 280;
 export const HOST_HEARTBEAT_MS = 5000;
 /**
- * After the last client disconnects, wait this long before wiping the room.
- * Short grace so a single tab refresh doesn't destroy the room; empty rooms
- * do not sit for hours.
+ * After the last client disconnects (no host-leave case), wait this long
+ * before wiping. Host leave closes the room immediately.
  */
-export const EMPTY_ROOM_GRACE_MS = 30_000;
+export const EMPTY_ROOM_GRACE_MS = 5_000;
 /** @deprecated use EMPTY_ROOM_GRACE_MS */
 export const ROOM_IDLE_TTL_MS = EMPTY_ROOM_GRACE_MS;
 /** Min ms between chat messages per session (stateless flood control). */
@@ -184,6 +183,13 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("error"),
     code: z.string(),
     message: z.string(),
+  }),
+  /** Room is gone — clients must leave (host disconnected). */
+  z.object({
+    type: z.literal("room_closed"),
+    reason: z.enum(["host_left", "empty", "destroyed"]),
+    message: z.string(),
+    serverTimeMs: z.number().int().nonnegative(),
   }),
 ]);
 

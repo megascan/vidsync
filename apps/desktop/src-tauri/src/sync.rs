@@ -38,6 +38,10 @@ pub enum SyncEvent {
         code: String,
         message: String,
     },
+    RoomClosed {
+        reason: String,
+        message: String,
+    },
 }
 
 pub struct SyncHandle {
@@ -182,6 +186,10 @@ fn map_server(sm: ServerMessage) -> Option<SyncEvent> {
         ServerMessage::Members { members, .. } => SyncEvent::Members { members },
         ServerMessage::Chat { message } => SyncEvent::Chat { message },
         ServerMessage::Error { code, message } => SyncEvent::Error { code, message },
+        ServerMessage::RoomClosed { reason, message, .. } => SyncEvent::RoomClosed {
+            reason,
+            message,
+        },
     })
 }
 
