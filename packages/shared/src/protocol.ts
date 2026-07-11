@@ -4,6 +4,7 @@ export const ROOM_CODE_LENGTH = 8;
 export const MAX_MEMBERS = 20;
 export const MAX_NICKNAME_LENGTH = 24;
 export const MAX_VIDEO_URL_LENGTH = 2048;
+export const MAX_QUEUE_LENGTH = 50;
 export const HOST_HEARTBEAT_MS = 5000;
 export const ROOM_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -41,7 +42,9 @@ export function isAllowedVideoUrl(raw: string): boolean {
 export const videoUrlSchema = z
   .string()
   .max(MAX_VIDEO_URL_LENGTH)
-  .refine(isAllowedVideoUrl, { message: "URL must be public https" });
+  .refine(isAllowedVideoUrl, {
+    message: "Video URL must be public https (no localhost/private hosts).",
+  });
 
 export const playbackStateSchema = z.object({
   version: z.number().int().nonnegative(),
@@ -51,6 +54,10 @@ export const playbackStateSchema = z.object({
   serverAnchorMs: z.number().int().nonnegative(),
   hostSessionId: z.string().nullable(),
   updatedAtMs: z.number().int().nonnegative(),
+  /** Ordered playlist of public https stream URLs. */
+  queue: z.array(z.string()).default([]),
+  /** Index into queue for current item, or null if nothing selected. */
+  queueIndex: z.number().int().nonnegative().nullable().default(null),
 });
 
 export type PlaybackState = z.infer<typeof playbackStateSchema>;
@@ -72,6 +79,23 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("set_url"),
     url: videoUrlSchema,
+  }),
+  z.object({
+    type: z.literal("queue_add"),
+    url: videoUrlSchema,
+    /** If true (default), start this item when nothing is playing yet. */
+    playIfIdle: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal("queue_remove"),
+    index: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("queue_play"),
+    index: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("queue_clear"),
   }),
   z.object({
     type: z.literal("play"),
@@ -132,7 +156,11 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 
 export const createRoomBodySchema = z.object({
-  videoUrl: videoUrlSchema.optional(),
+  /** Optional seed URL — room can also be created empty (sync group only). */
+  videoUrl: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    videoUrlSchema.optional(),
+  ),
   /** Cloudflare Turnstile response token from the widget. */
   turnstileToken: z.string().min(1).max(2048),
 });
@@ -156,5 +184,62 @@ export function emptyPlaybackState(nowMs: number): PlaybackState {
     serverAnchorMs: nowMs,
     hostSessionId: null,
     updatedAtMs: nowMs,
+    queue: [],
+    queueIndex: null,
+  };
+}
+
+/** Backfill queue fields for rooms stored before queue existed. */
+export function normalizePlaybackState(
+  raw: Partial<PlaybackState> & {
+    version?: number;
+    videoUrl?: string | null;
+  },
+  nowMs: number = Date.now(),
+): PlaybackState {
+  const base = emptyPlaybackState(nowMs);
+  let queue = Array.isArray(raw.queue)
+    ? raw.queue.filter((u): u is string => typeof u === "string" && isAllowedVideoUrl(u))
+    : [];
+  if (queue.length === 0 && raw.videoUrl && isAllowedVideoUrl(raw.videoUrl)) {
+    queue = [raw.videoUrl];
+  }
+  queue = queue.slice(0, MAX_QUEUE_LENGTH);
+
+  let queueIndex: number | null =
+    typeof raw.queueIndex === "number" && Number.isInteger(raw.queueIndex)
+      ? raw.queueIndex
+      : null;
+  if (queueIndex != null && (queueIndex < 0 || queueIndex >= queue.length)) {
+    queueIndex = queue.length > 0 ? 0 : null;
+  }
+  if (queueIndex == null && queue.length > 0 && raw.videoUrl) {
+    const idx = queue.indexOf(raw.videoUrl);
+    queueIndex = idx >= 0 ? idx : 0;
+  }
+
+  const videoUrl =
+    queueIndex != null ? (queue[queueIndex] ?? null) : (raw.videoUrl ?? null);
+
+  return {
+    version: typeof raw.version === "number" ? raw.version : base.version,
+    videoUrl,
+    isPlaying: Boolean(raw.isPlaying),
+    positionMs:
+      typeof raw.positionMs === "number" && raw.positionMs >= 0
+        ? raw.positionMs
+        : 0,
+    serverAnchorMs:
+      typeof raw.serverAnchorMs === "number"
+        ? raw.serverAnchorMs
+        : base.serverAnchorMs,
+    hostSessionId:
+      typeof raw.hostSessionId === "string" || raw.hostSessionId === null
+        ? (raw.hostSessionId ?? null)
+        : null,
+    updatedAtMs:
+      typeof raw.updatedAtMs === "number" ? raw.updatedAtMs : base.updatedAtMs,
+    queue,
+    queueIndex,
   };
 }

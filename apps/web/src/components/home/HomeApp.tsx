@@ -1,11 +1,9 @@
 import { useCallback, useState } from "react";
-import { isAllowedVideoUrl } from "@vidsync/shared";
 import { createRoom } from "../../lib/api";
 import { isValidRoomCode, normalizeRoomCode } from "../../lib/roomCode";
 import Turnstile from "../Turnstile";
 
 export default function HomeApp() {
-  const [videoUrl, setVideoUrl] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -18,21 +16,14 @@ export default function HomeApp() {
 
   async function onCreate() {
     setError(null);
-    const url = videoUrl.trim();
-    if (url && !isAllowedVideoUrl(url)) {
-      setError("Video URL must be public https (no localhost/private hosts).");
-      return;
-    }
     if (!turnstileToken) {
       setError("Complete the captcha first.");
       return;
     }
     setBusy(true);
     try {
-      const { code } = await createRoom({
-        videoUrl: url || undefined,
-        turnstileToken,
-      });
+      // Empty room = sync group; host queues streams inside the room
+      const { code } = await createRoom({ turnstileToken });
       window.location.href = `/r/${code}`;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create room");
@@ -57,16 +48,10 @@ export default function HomeApp() {
     <div className="flex flex-col gap-6">
       <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h2 className="text-sm font-medium">Create room</h2>
-        <label className="mt-3 block text-xs text-[var(--color-muted)]">
-          Stream URL (optional)
-          <input
-            type="url"
-            value={videoUrl}
-            onChange={(e) => setVideoUrl(e.target.value)}
-            placeholder="https://cdn.example.com/movie.mp4"
-            className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
-          />
-        </label>
+        <p className="mt-1 text-xs leading-relaxed text-[var(--color-muted)]">
+          Opens an empty sync group. After join, the host queues public HTTPS
+          stream URLs (MP4, WebM, HLS). No video required up front.
+        </p>
 
         <Turnstile onToken={onToken} resetKey={captchaReset} />
 

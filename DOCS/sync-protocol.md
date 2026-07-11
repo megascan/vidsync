@@ -4,7 +4,9 @@ Wire: JSON text over WebSocket. Schemas: `packages/shared`.
 
 ## PlaybackState
 - `version` monotonic
-- `videoUrl` https or null
+- `videoUrl` https or null (current item)
+- `queue` string[] of public https URLs
+- `queueIndex` number | null
 - `isPlaying`
 - `positionMs` at `serverAnchorMs`
 - `hostSessionId`
@@ -14,7 +16,7 @@ Expected position while playing:
 `positionMs + (nowMs - serverAnchorMs)` (client may subtract RTT/2).
 
 ## Client → server
-`hello`, `set_url`, `play`, `pause`, `seek`, `heartbeat`, `transfer_host`, `set_nickname`
+`hello`, `queue_add`, `queue_remove`, `queue_play`, `queue_clear`, `set_url`, `play`, `pause`, `seek`, `heartbeat`, `transfer_host`, `set_nickname`
 
 ## Server → client
 `welcome`, `state`, `members`, `error`

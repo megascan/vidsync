@@ -3,6 +3,7 @@ export {
   MAX_MEMBERS,
   MAX_NICKNAME_LENGTH,
   MAX_VIDEO_URL_LENGTH,
+  MAX_QUEUE_LENGTH,
   HOST_HEARTBEAT_MS,
   ROOM_IDLE_TTL_MS,
   ROOM_CODE_ALPHABET,
@@ -17,6 +18,7 @@ export {
   createRoomBodySchema,
   expectedPositionMs,
   emptyPlaybackState,
+  normalizePlaybackState,
 } from "./protocol";
 
 export type {

@@ -1,9 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   MAX_MEMBERS,
+  MAX_QUEUE_LENGTH,
   ROOM_IDLE_TTL_MS,
   clientMessageSchema,
   emptyPlaybackState,
+  isAllowedVideoUrl,
+  normalizePlaybackState,
   type ClientMessage,
   type Member,
   type PlaybackState,
@@ -45,7 +48,13 @@ export class Room extends DurableObject<Env> {
     );
 
     this.ctx.blockConcurrencyWhile(async () => {
-      this.room = (await this.ctx.storage.get<StoredRoom>("room")) ?? null;
+      const stored = (await this.ctx.storage.get<StoredRoom>("room")) ?? null;
+      if (stored) {
+        stored.state = normalizePlaybackState(stored.state);
+        this.room = stored;
+      } else {
+        this.room = null;
+      }
     });
   }
 
@@ -82,21 +91,25 @@ export class Room extends DurableObject<Env> {
 
     const now = Date.now();
     if (!this.room) {
-      this.room = {
-        code: body.code,
-        createdAtMs: now,
-        lastActiveAtMs: now,
-        state: emptyPlaybackState(now),
-      };
-      if (body.videoUrl) {
-        this.room.state = {
-          ...this.room.state,
+      let state = emptyPlaybackState(now);
+      // Optional seed URL into queue (create can also be empty sync group)
+      if (body.videoUrl && isAllowedVideoUrl(body.videoUrl)) {
+        state = {
+          ...state,
           version: 1,
+          queue: [body.videoUrl],
+          queueIndex: 0,
           videoUrl: body.videoUrl,
           updatedAtMs: now,
           serverAnchorMs: now,
         };
       }
+      this.room = {
+        code: body.code,
+        createdAtMs: now,
+        lastActiveAtMs: now,
+        state,
+      };
       await this.persist();
       await this.scheduleIdleAlarm();
     }
@@ -105,6 +118,7 @@ export class Room extends DurableObject<Env> {
       code: this.room.code,
       createdAtMs: this.room.createdAtMs,
       hasVideo: this.room.state.videoUrl != null,
+      queueLength: this.room.state.queue.length,
       memberCount: this.sessions.size,
     });
   }
@@ -119,6 +133,7 @@ export class Room extends DurableObject<Env> {
       createdAtMs: this.room.createdAtMs,
       memberCount: this.liveMemberCount(),
       hasVideo: this.room.state.videoUrl != null,
+      queueLength: this.room.state.queue.length,
     });
   }
 
@@ -152,7 +167,10 @@ export class Room extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  async webSocketMessage(
+    ws: WebSocket,
+    message: string | ArrayBuffer,
+  ): Promise<void> {
     if (typeof message !== "string") {
       this.send(ws, {
         type: "error",
@@ -197,7 +215,11 @@ export class Room extends DurableObject<Env> {
     await this.handleClientMessage(ws, session, parsed.data);
   }
 
-  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+  async webSocketClose(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+  ): Promise<void> {
     const session = this.sessions.get(ws);
     this.sessions.delete(ws);
     try {
@@ -363,10 +385,62 @@ export class Room extends DurableObject<Env> {
 
     switch (msg.type) {
       case "set_url": {
+        // Compat: add to queue and select as current (play immediately after load)
+        if (
+          !this.room.state.queue.includes(msg.url) &&
+          this.room.state.queue.length >= MAX_QUEUE_LENGTH
+        ) {
+          this.send(ws, {
+            type: "error",
+            code: "queue_full",
+            message: `Queue is full (max ${MAX_QUEUE_LENGTH})`,
+          });
+          return;
+        }
+        this.applySetUrl(msg.url, now);
+        break;
+      }
+      case "queue_add": {
+        if (this.room.state.queue.length >= MAX_QUEUE_LENGTH) {
+          this.send(ws, {
+            type: "error",
+            code: "queue_full",
+            message: `Queue is full (max ${MAX_QUEUE_LENGTH})`,
+          });
+          return;
+        }
+        this.applyQueueAdd(msg.url, now, msg.playIfIdle !== false);
+        break;
+      }
+      case "queue_remove": {
+        if (!this.applyQueueRemove(msg.index, now)) {
+          this.send(ws, {
+            type: "error",
+            code: "invalid_index",
+            message: "Queue index out of range",
+          });
+          return;
+        }
+        break;
+      }
+      case "queue_play": {
+        if (!this.applyQueuePlay(msg.index, now)) {
+          this.send(ws, {
+            type: "error",
+            code: "invalid_index",
+            message: "Queue index out of range",
+          });
+          return;
+        }
+        break;
+      }
+      case "queue_clear": {
         this.room.state = {
           ...this.room.state,
           version: this.room.state.version + 1,
-          videoUrl: msg.url,
+          queue: [],
+          queueIndex: null,
+          videoUrl: null,
           isPlaying: false,
           positionMs: 0,
           serverAnchorMs: now,
@@ -375,6 +449,14 @@ export class Room extends DurableObject<Env> {
         break;
       }
       case "play": {
+        if (!this.room.state.videoUrl) {
+          this.send(ws, {
+            type: "error",
+            code: "no_video",
+            message: "Queue a video first",
+          });
+          return;
+        }
         this.room.state = {
           ...this.room.state,
           version: this.room.state.version + 1,
@@ -408,14 +490,12 @@ export class Room extends DurableObject<Env> {
         break;
       }
       case "heartbeat": {
-        // Throttle broadcasts; always update stored anchor for joiners
         this.room.state = {
           ...this.room.state,
           isPlaying: msg.isPlaying,
           positionMs: msg.positionMs,
           serverAnchorMs: now,
           updatedAtMs: now,
-          // no version bump for pure heartbeat unless broadcasting
           version: this.room.state.version,
         };
         const since = now - this.lastHeartbeatBroadcastMs;
@@ -441,6 +521,134 @@ export class Room extends DurableObject<Env> {
     await this.persist();
     this.broadcastState();
     await this.touch();
+  }
+
+  private applyQueueAdd(
+    url: string,
+    now: number,
+    playIfIdle: boolean,
+  ): void {
+    if (!this.room) return;
+    if (!isAllowedVideoUrl(url)) return;
+
+    const queue = [...this.room.state.queue];
+    if (queue.length >= MAX_QUEUE_LENGTH) {
+      return;
+    }
+    queue.push(url);
+
+    const idle =
+      this.room.state.videoUrl == null || this.room.state.queueIndex == null;
+    let queueIndex = this.room.state.queueIndex;
+    let videoUrl = this.room.state.videoUrl;
+    let positionMs = this.room.state.positionMs;
+    let isPlaying = this.room.state.isPlaying;
+
+    if (idle && playIfIdle) {
+      queueIndex = queue.length - 1;
+      videoUrl = url;
+      positionMs = 0;
+      isPlaying = false;
+    }
+
+    this.room.state = {
+      ...this.room.state,
+      version: this.room.state.version + 1,
+      queue,
+      queueIndex,
+      videoUrl,
+      positionMs,
+      isPlaying,
+      serverAnchorMs: now,
+      updatedAtMs: now,
+    };
+  }
+
+  /** Add URL if missing, always select it as current (reset position). */
+  private applySetUrl(url: string, now: number): void {
+    if (!this.room) return;
+    if (!isAllowedVideoUrl(url)) return;
+
+    const queue = [...this.room.state.queue];
+    let index = queue.indexOf(url);
+    if (index < 0) {
+      if (queue.length >= MAX_QUEUE_LENGTH) return;
+      queue.push(url);
+      index = queue.length - 1;
+    }
+
+    this.room.state = {
+      ...this.room.state,
+      version: this.room.state.version + 1,
+      queue,
+      queueIndex: index,
+      videoUrl: url,
+      isPlaying: false,
+      positionMs: 0,
+      serverAnchorMs: now,
+      updatedAtMs: now,
+    };
+  }
+
+  private applyQueueRemove(index: number, now: number): boolean {
+    if (!this.room) return false;
+    const queue = [...this.room.state.queue];
+    if (index < 0 || index >= queue.length) return false;
+
+    queue.splice(index, 1);
+
+    let queueIndex = this.room.state.queueIndex;
+    let videoUrl = this.room.state.videoUrl;
+    let positionMs = this.room.state.positionMs;
+    let isPlaying = this.room.state.isPlaying;
+
+    if (queue.length === 0) {
+      queueIndex = null;
+      videoUrl = null;
+      positionMs = 0;
+      isPlaying = false;
+    } else if (queueIndex != null) {
+      if (index === queueIndex) {
+        // Removed current → stay on same index (next item) or clamp
+        queueIndex = Math.min(index, queue.length - 1);
+        videoUrl = queue[queueIndex] ?? null;
+        positionMs = 0;
+        isPlaying = false;
+      } else if (index < queueIndex) {
+        queueIndex = queueIndex - 1;
+      }
+    }
+
+    this.room.state = {
+      ...this.room.state,
+      version: this.room.state.version + 1,
+      queue,
+      queueIndex,
+      videoUrl,
+      positionMs,
+      isPlaying,
+      serverAnchorMs: now,
+      updatedAtMs: now,
+    };
+    return true;
+  }
+
+  private applyQueuePlay(index: number, now: number): boolean {
+    if (!this.room) return false;
+    const url = this.room.state.queue[index];
+    if (url == null) return false;
+
+    this.room.state = {
+      ...this.room.state,
+      version: this.room.state.version + 1,
+      queueIndex: index,
+      videoUrl: url,
+      isPlaying: false,
+      positionMs: 0,
+      serverAnchorMs: now,
+      updatedAtMs: now,
+    };
+    return true;
   }
 
   private broadcastState(): void {
@@ -503,7 +711,6 @@ export class Room extends DurableObject<Env> {
     for (const s of this.sessions.values()) {
       if (s.helloDone) n++;
     }
-    // count pending hellos toward cap too
     return Math.max(n, this.sessions.size);
   }
 
@@ -539,7 +746,6 @@ export class Room extends DurableObject<Env> {
 
   private async scheduleIdleAlarm(): Promise<void> {
     if (this.liveMemberCount() > 0) {
-      // keep a far alarm; GC only when empty
       return;
     }
     if (!this.room) return;

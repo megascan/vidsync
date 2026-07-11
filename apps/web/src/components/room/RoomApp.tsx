@@ -6,7 +6,10 @@ import {
 } from "@vidsync/shared";
 import { wsUrlForRoom } from "../../lib/api";
 import { loadNickname, saveNickname } from "../../lib/nickname";
-import { attachVideoSource, type SourceHandle } from "../../lib/player/attachSource";
+import {
+  attachVideoSource,
+  type SourceHandle,
+} from "../../lib/player/attachSource";
 import { parseRoomCodeFromLocation } from "../../lib/roomCode";
 import { applyDrift, SyncClient } from "../../lib/sync/client";
 import { useRoomStore } from "../../lib/store/roomStore";
@@ -16,6 +19,16 @@ function formatTime(ms: number): string {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function shortUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.length > 28 ? `${u.pathname.slice(0, 28)}…` : u.pathname;
+    return `${u.hostname}${path}`;
+  } catch {
+    return url.slice(0, 48);
+  }
 }
 
 export default function RoomApp() {
@@ -50,7 +63,6 @@ export default function RoomApp() {
   const [copied, setCopied] = useState(false);
   const [nickDraft, setNickDraft] = useState("");
 
-  // Resolve code from location
   useEffect(() => {
     const resolved = parseRoomCodeFromLocation(
       window.location.pathname,
@@ -61,7 +73,6 @@ export default function RoomApp() {
       return;
     }
     setCode(resolved);
-    // keep pretty URL if landed on /room?code=
     if (!window.location.pathname.startsWith("/r/")) {
       window.history.replaceState(null, "", `/r/${resolved}`);
     }
@@ -70,7 +81,6 @@ export default function RoomApp() {
     setNickDraft(nick);
   }, [setCode, setLastError, setNickname]);
 
-  // Connect WS
   useEffect(() => {
     if (!code) return;
     const nick = loadNickname();
@@ -78,7 +88,6 @@ export default function RoomApp() {
       onConn: setConn,
       onWelcome: (p) => {
         setWelcome(p);
-        setUrlDraft(p.state.videoUrl ?? "");
         lastVersion.current = p.state.version;
       },
       onState: (state) => {
@@ -104,7 +113,6 @@ export default function RoomApp() {
     setWelcome,
   ]);
 
-  // Attach media source when URL changes
   useEffect(() => {
     const video = videoRef.current;
     const url = playback?.videoUrl;
@@ -123,14 +131,15 @@ export default function RoomApp() {
     };
   }, [playback?.videoUrl, setMediaError]);
 
-  // Apply remote playback state
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !playback) return;
-    if (playback.version === lastVersion.current && !isHost) {
-      // still drift-correct on same version via interval
-    }
     lastVersion.current = playback.version;
+
+    if (!playback.videoUrl) {
+      video.pause();
+      return;
+    }
 
     applyingRemote.current = true;
     applyDrift(video, playback, clockOffsetMs);
@@ -143,7 +152,7 @@ export default function RoomApp() {
           video.pause();
         }
       } catch {
-        // autoplay blocked — user gesture needed
+        // autoplay blocked
       } finally {
         queueMicrotask(() => {
           applyingRemote.current = false;
@@ -153,7 +162,6 @@ export default function RoomApp() {
     void run();
   }, [playback, clockOffsetMs, isHost]);
 
-  // Periodic drift for followers + host heartbeat
   useEffect(() => {
     const id = window.setInterval(() => {
       const video = videoRef.current;
@@ -161,7 +169,7 @@ export default function RoomApp() {
       const state = useRoomStore.getState().playback;
       const host = useRoomStore.getState().isHost;
       const offset = useRoomStore.getState().clockOffsetMs;
-      if (!video || !state) return;
+      if (!video || !state?.videoUrl) return;
 
       if (!host) {
         applyDrift(video, state, offset);
@@ -186,6 +194,10 @@ export default function RoomApp() {
   );
 
   const onPlayClick = () => {
+    if (!playback?.videoUrl) {
+      setLastError("Queue a video first");
+      return;
+    }
     sendHost((positionMs) => {
       clientRef.current?.send({ type: "play", positionMs });
       void videoRef.current?.play();
@@ -211,14 +223,33 @@ export default function RoomApp() {
     });
   };
 
-  const onSetUrl = () => {
+  const onQueueAdd = () => {
     const url = urlDraft.trim();
     if (!isHost) return;
     if (!isAllowedVideoUrl(url)) {
-      setLastError("URL must be public https");
+      setLastError(
+        "Video URL must be public https (no localhost/private hosts).",
+      );
       return;
     }
-    clientRef.current?.send({ type: "set_url", url });
+    clientRef.current?.send({ type: "queue_add", url, playIfIdle: true });
+    setUrlDraft("");
+    setLastError(null);
+  };
+
+  const onQueuePlay = (index: number) => {
+    if (!isHost) return;
+    clientRef.current?.send({ type: "queue_play", index });
+  };
+
+  const onQueueRemove = (index: number) => {
+    if (!isHost) return;
+    clientRef.current?.send({ type: "queue_remove", index });
+  };
+
+  const onQueueClear = () => {
+    if (!isHost) return;
+    clientRef.current?.send({ type: "queue_clear" });
   };
 
   const onSaveNick = () => {
@@ -248,6 +279,7 @@ export default function RoomApp() {
       }
       return;
     }
+    if (!playback?.videoUrl) return;
     sendHost((positionMs) => {
       clientRef.current?.send({ type: "play", positionMs });
     });
@@ -267,6 +299,9 @@ export default function RoomApp() {
 
   const duration = videoRef.current?.duration;
   const durationOk = duration != null && Number.isFinite(duration);
+  const queue = playback?.queue ?? [];
+  const queueIndex = playback?.queueIndex ?? null;
+  const hasVideo = Boolean(playback?.videoUrl);
 
   return (
     <div className="mx-auto flex min-h-full max-w-5xl flex-col gap-4 px-3 py-4 md:px-6">
@@ -279,7 +314,9 @@ export default function RoomApp() {
             VidSync
           </a>
           <div className="mt-1 flex flex-wrap items-center gap-2">
-            <span className="font-mono text-lg tracking-widest">{code ?? "……"}</span>
+            <span className="font-mono text-lg tracking-widest">
+              {code ?? "……"}
+            </span>
             {isHost ? (
               <span className="rounded bg-[var(--color-accent)]/15 px-2 py-0.5 text-xs font-medium text-[var(--color-accent)]">
                 Host
@@ -309,34 +346,52 @@ export default function RoomApp() {
         </div>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_240px]">
+      <div className="grid gap-4 lg:grid-cols-[1fr_280px]">
         <section className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-black">
-          <video
-            ref={videoRef}
-            className="aspect-video w-full bg-black"
-            playsInline
-            controls={isHost}
-            onPlay={onVideoPlay}
-            onPause={onVideoPause}
-          />
+          {hasVideo ? (
+            <video
+              ref={videoRef}
+              className="aspect-video w-full bg-black"
+              playsInline
+              controls={isHost}
+              onPlay={onVideoPlay}
+              onPause={onVideoPause}
+            />
+          ) : (
+            <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-[var(--color-surface)] px-6 text-center">
+              <p className="text-sm font-medium text-[var(--color-text)]">
+                Empty sync room
+              </p>
+              <p className="max-w-sm text-xs leading-relaxed text-[var(--color-muted)]">
+                {isHost
+                  ? "Queue a public HTTPS stream URL below to start watching together."
+                  : "Waiting for the host to queue a video."}
+              </p>
+              {/* keep ref attached even when empty for later */}
+              <video ref={videoRef} className="hidden" playsInline />
+            </div>
+          )}
           <div className="flex flex-col gap-3 border-t border-[var(--color-border)] bg-[var(--color-surface)] p-3">
             {!isHost ? (
               <p className="text-xs text-[var(--color-muted)]">
-                Host controls playback. Stay on this tab for best sync.
+                Host controls playback and queue. Stay on this tab for best
+                sync.
               </p>
             ) : (
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={onPlayClick}
-                  className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-black"
+                  disabled={!hasVideo}
+                  className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-black disabled:opacity-40"
                 >
                   Play
                 </button>
                 <button
                   type="button"
                   onClick={onPauseClick}
-                  className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm"
+                  disabled={!hasVideo}
+                  className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-40"
                 >
                   Pause
                 </button>
@@ -353,40 +408,105 @@ export default function RoomApp() {
                   />
                 ) : null}
                 <span className="font-mono text-xs text-[var(--color-muted)]">
-                  {playback
-                    ? formatTime(playback.positionMs)
-                    : "0:00"}
+                  {playback ? formatTime(playback.positionMs) : "0:00"}
                   {durationOk ? ` / ${formatTime(duration * 1000)}` : ""}
                 </span>
               </div>
             )}
 
-            {isHost ? (
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <input
-                  type="url"
-                  value={urlDraft}
-                  onChange={(e) => setUrlDraft(e.target.value)}
-                  placeholder="https://…/video.mp4 or .m3u8"
-                  className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
-                />
-                <button
-                  type="button"
-                  onClick={onSetUrl}
-                  className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm whitespace-nowrap"
-                >
-                  Set URL
-                </button>
-              </div>
-            ) : (
+            {hasVideo ? (
               <p className="truncate font-mono text-xs text-[var(--color-muted)]">
-                {playback?.videoUrl ?? "No video set"}
+                Now: {playback?.videoUrl}
               </p>
-            )}
+            ) : null}
           </div>
         </section>
 
         <aside className="flex flex-col gap-3">
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-xs font-medium tracking-wide text-[var(--color-muted)] uppercase">
+                Queue ({queue.length})
+              </h2>
+              {isHost && queue.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={onQueueClear}
+                  className="text-[11px] text-[var(--color-muted)] hover:text-[var(--color-danger)]"
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+
+            {isHost ? (
+              <div className="mt-2 flex flex-col gap-2">
+                <input
+                  type="url"
+                  value={urlDraft}
+                  onChange={(e) => setUrlDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onQueueAdd();
+                  }}
+                  placeholder="https://…/video.mp4 or .m3u8"
+                  className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]"
+                />
+                <button
+                  type="button"
+                  onClick={onQueueAdd}
+                  className="rounded-md border border-[var(--color-border)] px-2 py-1.5 text-xs font-medium hover:border-[var(--color-accent)]"
+                >
+                  Add to queue
+                </button>
+                <p className="text-[10px] leading-snug text-[var(--color-muted)]">
+                  Public HTTPS only — no localhost or private hosts.
+                </p>
+              </div>
+            ) : null}
+
+            <ul className="mt-2 flex max-h-56 flex-col gap-1 overflow-y-auto">
+              {queue.map((url, i) => {
+                const active = i === queueIndex;
+                return (
+                  <li
+                    key={`${i}-${url}`}
+                    className={`flex items-start gap-1 rounded-md px-1.5 py-1 text-xs ${
+                      active
+                        ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                        : "text-[var(--color-text)]"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      disabled={!isHost}
+                      onClick={() => onQueuePlay(i)}
+                      className="min-w-0 flex-1 truncate text-left font-mono disabled:cursor-default"
+                      title={url}
+                    >
+                      {active ? "▶ " : `${i + 1}. `}
+                      {shortUrl(url)}
+                    </button>
+                    {isHost ? (
+                      <button
+                        type="button"
+                        onClick={() => onQueueRemove(i)}
+                        className="shrink-0 px-1 text-[var(--color-muted)] hover:text-[var(--color-danger)]"
+                        aria-label={`Remove item ${i + 1}`}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </li>
+                );
+              })}
+              {queue.length === 0 ? (
+                <li className="text-xs text-[var(--color-muted)]">
+                  Queue empty
+                </li>
+              ) : null}
+            </ul>
+          </div>
+
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
             <h2 className="text-xs font-medium tracking-wide text-[var(--color-muted)] uppercase">
               In room ({members.length})
@@ -397,17 +517,23 @@ export default function RoomApp() {
                   key={m.sessionId}
                   className="flex items-center justify-between text-sm"
                 >
-                  <span className={m.sessionId === sessionId ? "font-medium" : ""}>
+                  <span
+                    className={m.sessionId === sessionId ? "font-medium" : ""}
+                  >
                     {m.nickname}
                     {m.sessionId === sessionId ? " (you)" : ""}
                   </span>
                   {m.isHost ? (
-                    <span className="text-xs text-[var(--color-accent)]">host</span>
+                    <span className="text-xs text-[var(--color-accent)]">
+                      host
+                    </span>
                   ) : null}
                 </li>
               ))}
               {members.length === 0 ? (
-                <li className="text-xs text-[var(--color-muted)]">Connecting…</li>
+                <li className="text-xs text-[var(--color-muted)]">
+                  Connecting…
+                </li>
               ) : null}
             </ul>
           </div>
@@ -431,9 +557,6 @@ export default function RoomApp() {
                 </button>
               </div>
             </label>
-            <p className="mt-2 text-[11px] leading-snug text-[var(--color-muted)]">
-              Session: {sessionId?.slice(0, 8) ?? "—"}
-            </p>
           </div>
         </aside>
       </div>
@@ -475,6 +598,8 @@ function StateDebug({ playback }: { playback: PlaybackState | null }) {
             version: playback.version,
             isPlaying: playback.isPlaying,
             positionMs: Math.round(playback.positionMs),
+            queueIndex: playback.queueIndex,
+            queue: playback.queue.length,
             host: playback.hostSessionId?.slice(0, 8),
           },
           null,
