@@ -5,28 +5,31 @@ Anonymous watch parties. **Desktop app** creates a lobby, streams a local file, 
 **API:** `https://api.vidsync.ratt.ing`  
 **Legacy web:** [https://vidsync.ratt.ing](https://vidsync.ratt.ing)
 
-## Desktop (primary)
+## Desktop (primary) — Tauri
 
 ```bash
-cd apps/host
-cargo run --release
+cd apps/desktop
+bun install
+bun run tauri:dev
+# ship: bun run tauri:build
 ```
 
-- Create / join room (no browser)
+- Create / join room (no browser tab)
 - Host: stream a local video (HTTP + optional UPnP + public IP)
-- Playback in a **native player window** (system WebView — no extra app downloads)
-- Host Play/Pause syncs the room
+- Playback in-app (`<video>` via system WebView — no mpv)
+- Host Play/Pause/seek syncs the room
 
-See `apps/host/README.md` and `DOCS/desktop.md`.
+See `apps/desktop/README.md` and `DOCS/desktop.md`.
 
 ## Monorepo
 
 ```
-apps/host         Rust desktop (vidsync) — lobby + stream + mpv
+apps/desktop      Tauri 2 — primary client
+apps/host         Legacy egui / CLI stream helper
 workers/api       Worker + Room DO
 packages/shared   Protocol (zod)
 apps/web          Legacy browser lobby
-extensions/       Legacy Unblock player (browser CORS)
+extensions/       Legacy Unblock player
 DOCS/
 ```
 

@@ -3,9 +3,10 @@
 Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsync`).
 
 ## Stack
-- `apps/host` — Rust desktop: lobby, DO sync, local HTTP stream, UPnP, native WebView player
+- `apps/desktop` — **primary** Tauri 2 client (lobby + player + stream)
+- `apps/host` — legacy egui CLI/host experiments (optional)
 - `workers/api` — CF Worker + Durable Object (`Room`) WebSocket hibernation
-- `packages/shared` — protocol zod schemas (TS); Rust mirrors in `apps/host/src/protocol.rs`
+- `packages/shared` — protocol zod schemas (TS)
 - `apps/web` — **legacy** Astro lobby (optional)
 - `extensions/vidsync-unblock` — **legacy** browser CORS player
 
@@ -18,7 +19,8 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 - Document decisions in `DOCS/`. Debt in `TECH_DEBT.md`.
 
 ## Commands
-- `cd apps/host && cargo run --release` — desktop GUI
+- `bun run dev:desktop` — Tauri desktop (primary)
+- `cd apps/desktop && bun run tauri:build` — installers
 - `bun run dev:api` — wrangler DO local
 - `bun run dev:web` — legacy web (optional)
 - Prod API: `https://api.vidsync.ratt.ing`
@@ -26,5 +28,6 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 
 ## Docs
 - `DOCS/desktop.md` — desktop architecture
+- `apps/desktop/README.md` — Tauri run/build
 - `DOCS/host-app.md` — stream / UPnP notes
 - `DOCS/sync-protocol.md` — wire protocol

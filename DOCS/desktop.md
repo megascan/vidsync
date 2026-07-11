@@ -1,31 +1,65 @@
 # VidSync desktop
 
-Primary client is the **Rust app** (`apps/host` → binary `vidsync`).
+Primary client: **Tauri 2** app in `apps/desktop`.
 
 ## Stack
 
-- egui UI (create/join lobby, queue, chat, host controls)
-- WebSocket sync → `workers/api` Room Durable Object (same protocol as web)
-- Local HTTP Range server + UPnP + public IP probe
-- **System WebView player** (`wry` + `tao`) — WebView2 / WKWebView / WebKitGTK  
-  No mpv/ffmpeg download. OS codecs. Platform-agnostic.
+| Layer | Tech |
+|---|---|
+| Shell | Tauri 2 (system WebView) |
+| UI | Vite + TypeScript — lobby + embedded `<video>` |
+| Core | Rust — DO sync, HTTP Range server, UPnP, public IP |
+| Multiplayer | `workers/api` Room Durable Object (unchanged) |
+
+No browser extension. No mpv download. Codecs = OS media stack.
+
+## Dev / ship
+
+```bash
+cd apps/desktop
+bun install
+bun run tauri:dev      # hot reload
+bun run tauri:build    # MSI / DMG / AppImage etc.
+```
+
+Root: `bun run dev:desktop` · `bun run build:desktop`
 
 ## Auth / create
 
 | Client | Create room |
 |---|---|
 | Web | Turnstile required |
-| Desktop | `X-VidSync-Client: desktop/<ver>` skips captcha |
+| Desktop | `X-VidSync-Client: desktop/…` skips captcha |
 
-WS with no `Origin` is allowed (see `isWebSocketOriginOk`).
+WS with no `Origin` is allowed.
 
-## Deprecations
+## Layout
 
-- `apps/web` — legacy lobby (optional)
-- `extensions/vidsync-unblock` — legacy CORS player for browser
-
-## Run
-
-```bash
-cd apps/host && cargo run --release
 ```
+apps/desktop/
+  src/                 frontend (main.ts, styles)
+  src-tauri/
+    src/
+      lib.rs           Tauri commands + events
+      sync.rs api.rs   DO client
+      session.rs …     file server + UPnP
+    tauri.conf.json
+```
+
+## Events
+
+Rust emits `sync-event` (welcome / state / members / chat / …).  
+UI invokes `room_create`, `room_join`, `stream_start`, `host_play`, …
+
+## Legacy
+
+- `apps/host` — earlier egui experiments  
+- `apps/web` + `extensions/` — browser path  
+
+## Platforms
+
+| OS | WebView |
+|---|---|
+| Windows | WebView2 |
+| macOS | WKWebView |
+| Linux | webkit2gtk (system package) |
