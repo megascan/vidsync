@@ -2,10 +2,10 @@
 
 Anonymous watch parties. **Desktop app** creates a lobby, streams a local file, keeps everyone in sync. Multiplayer state lives on Cloudflare (Durable Object).
 
-**API:** `https://api.vidsync.ratt.ing`  
-**Legacy web:** [https://vidsync.ratt.ing](https://vidsync.ratt.ing)
+**Site / downloads:** [https://vidsync.ratt.ing](https://vidsync.ratt.ing)  
+**API:** `https://api.vidsync.ratt.ing`
 
-## Desktop (primary) — Tauri
+## Desktop (primary)
 
 ```bash
 cd apps/desktop
@@ -14,22 +14,23 @@ bun run tauri:dev
 # ship: bun run tauri:build
 ```
 
-- Create / join room (no browser tab)
-- Host: stream a local video (HTTP + optional UPnP + public IP)
-- Playback in-app (`<video>` via system WebView — no mpv)
-- Host Play/Pause/seek syncs the room
+Windows + Linux installers build on every `master` push and publish to R2 (landing at vidsync.ratt.ing).  
+See `DOCS/ci-release.md`.
 
-See `apps/desktop/README.md` and `DOCS/desktop.md`.
+- Create / join room  
+- Host streams a local file; room stays in sync  
+- Native player (system WebView)
 
 ## Monorepo
 
 ```
-apps/desktop      Tauri 2 — primary client
-apps/host         Legacy egui / CLI stream helper
-workers/api       Worker + Room DO
-packages/shared   Protocol (zod)
+apps/desktop      Tauri 2 client
+apps/site         Landing + R2 download worker → vidsync.ratt.ing
+workers/api       Room DO
+packages/shared   Protocol
 apps/web          Legacy browser lobby
-extensions/       Legacy Unblock player
+apps/host         Legacy egui / CLI
+extensions/       Legacy Unblock
 DOCS/
 ```
 

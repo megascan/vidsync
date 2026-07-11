@@ -6,6 +6,7 @@
     "dev:web": "bun run --filter @vidsync/web dev",
     "dev:api": "bun run --filter @vidsync/api dev",
     "dev:desktop": "bun run --filter @vidsync/desktop tauri:dev",
+    "deploy:site": "bun run --filter @vidsync/site deploy",
     "build": "bun run --filter @vidsync/shared build && bun run --filter @vidsync/web build && bun run --filter @vidsync/api build",
     "build:desktop": "bun run --filter @vidsync/desktop tauri:build",
     "check": "bun run --filter @vidsync/shared check && bun run --filter @vidsync/web check && bun run --filter @vidsync/api check"

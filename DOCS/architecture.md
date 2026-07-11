@@ -3,7 +3,7 @@
 ## Domains
 | Host | Unit |
 |---|---|
-| `https://vidsync.ratt.ing` | `apps/web` static |
+| `https://vidsync.ratt.ing` | `apps/site` landing + R2 downloads |
 | `https://api.vidsync.ratt.ing` | `workers/api` |
 
 ## CORS / Origin

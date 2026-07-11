@@ -4,11 +4,10 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 
 ## Stack
 - `apps/desktop` — **primary** Tauri 2 client (lobby + player + stream)
-- `apps/host` — legacy egui CLI/host experiments (optional)
+- `apps/site` — landing + R2 downloads Worker → `vidsync.ratt.ing`
 - `workers/api` — CF Worker + Durable Object (`Room`) WebSocket hibernation
 - `packages/shared` — protocol zod schemas (TS)
-- `apps/web` — **legacy** Astro lobby (optional)
-- `extensions/vidsync-unblock` — **legacy** browser CORS player
+- `apps/web` / `apps/host` / `extensions` — legacy
 
 ## Rules
 - bun workspaces for TS. TypeScript strict. No `any`.
@@ -19,15 +18,14 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 - Document decisions in `DOCS/`. Debt in `TECH_DEBT.md`.
 
 ## Commands
-- `bun run dev:desktop` — Tauri desktop (primary)
-- `cd apps/desktop && bun run tauri:build` — installers
+- `bun run dev:desktop` — Tauri desktop
+- `cd apps/desktop && bun run tauri:build` — local installers
+- `cd apps/site && bunx wrangler deploy` — landing (needs CF auth)
 - `bun run dev:api` — wrangler DO local
-- `bun run dev:web` — legacy web (optional)
-- Prod API: `https://api.vidsync.ratt.ing`
-- Turnstile only for web create
+- Prod: site `vidsync.ratt.ing`, API `api.vidsync.ratt.ing`
+- CI: `.github/workflows/desktop-release.yml` → R2 + site
 
 ## Docs
+- `DOCS/ci-release.md` — GH Actions + R2 secrets
 - `DOCS/desktop.md` — desktop architecture
-- `apps/desktop/README.md` — Tauri run/build
-- `DOCS/host-app.md` — stream / UPnP notes
 - `DOCS/sync-protocol.md` — wire protocol

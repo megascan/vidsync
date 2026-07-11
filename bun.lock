@@ -10,7 +10,7 @@
     },
     "apps/desktop": {
       "name": "@vidsync/desktop",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@tauri-apps/api": "^2",
         "@tauri-apps/plugin-dialog": "^2",
@@ -20,6 +20,13 @@
         "@tauri-apps/cli": "^2",
         "typescript": "~5.6.2",
         "vite": "^6.0.3",
+      },
+    },
+    "apps/site": {
+      "name": "@vidsync/site",
+      "version": "0.1.0",
+      "devDependencies": {
+        "wrangler": "^4.105.0",
       },
     },
     "apps/web": {
@@ -529,6 +536,8 @@
     "@vidsync/desktop": ["@vidsync/desktop@workspace:apps/desktop"],
 
     "@vidsync/shared": ["@vidsync/shared@workspace:packages/shared"],
+
+    "@vidsync/site": ["@vidsync/site@workspace:apps/site"],
 
     "@vidsync/web": ["@vidsync/web@workspace:apps/web"],
 
