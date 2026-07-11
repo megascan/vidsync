@@ -44,6 +44,11 @@ pub enum SyncEvent {
     Chat {
         message: crate::protocol::ChatMessage,
     },
+    /// App-level RTT sample (ms) + server clock for offset.
+    Latency {
+        rtt_ms: u32,
+        server_time_ms: i64,
+    },
     Error {
         code: String,
         message: String,
@@ -281,9 +286,25 @@ async fn run_session(
         }
     }
 
-    let mut ping_tick = tokio::time::interval(Duration::from_secs(15));
-    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ping_tick.tick().await;
+    // Immediate RTT sample (don't wait for first interval)
+    {
+        let boot = ClientMessage::Ping {
+            client_time_ms: chrono_now(),
+            rtt_ms: None,
+        };
+        if let Ok(s) = serde_json::to_string(&boot) {
+            let _ = write.send(Message::Text(s.into())).await;
+        }
+    }
+
+    // App ping for RTT/clock (2s). WebSocket Ping keeps NAT mappings (~15s).
+    let mut app_ping_tick = tokio::time::interval(Duration::from_secs(2));
+    app_ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    app_ping_tick.tick().await;
+    let mut ws_ping_tick = tokio::time::interval(Duration::from_secs(15));
+    ws_ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ws_ping_tick.tick().await;
+    let mut last_rtt_ms: Option<u32> = None;
 
     loop {
         tokio::select! {
@@ -291,18 +312,29 @@ async fn run_session(
                 let _ = write.close().await;
                 return SessionEnd::UserShutdown;
             }
-            _ = ping_tick.tick() => {
+            _ = ws_ping_tick.tick() => {
                 if write.send(Message::Ping(Vec::new().into())).await.is_err() {
                     return SessionEnd::Dropped {
-                        reason: "ping failed".into(),
+                        reason: "ws ping failed".into(),
                         welcomed,
                     };
                 }
-                if write.send(Message::Text("ping".into())).await.is_err() {
-                    return SessionEnd::Dropped {
-                        reason: "ping failed".into(),
-                        welcomed,
-                    };
+            }
+            _ = app_ping_tick.tick() => {
+                let ping = ClientMessage::Ping {
+                    client_time_ms: chrono_now(),
+                    rtt_ms: last_rtt_ms,
+                };
+                match serde_json::to_string(&ping) {
+                    Ok(s) => {
+                        if write.send(Message::Text(s.into())).await.is_err() {
+                            return SessionEnd::Dropped {
+                                reason: "app ping failed".into(),
+                                welcomed,
+                            };
+                        }
+                    }
+                    Err(e) => warn!("serialize ping: {e}"),
                 }
             }
             msg = out_rx.recv() => {
@@ -329,9 +361,6 @@ async fn run_session(
             incoming = read.next() => {
                 match incoming {
                     Some(Ok(Message::Text(t))) => {
-                        if t == "pong" {
-                            continue;
-                        }
                         match serde_json::from_str::<ServerMessage>(&t) {
                             Ok(ServerMessage::RoomClosed { reason, message, .. }) => {
                                 let _ = event_tx.send(SyncEvent::RoomClosed {
@@ -340,6 +369,27 @@ async fn run_session(
                                 });
                                 let _ = write.close().await;
                                 return SessionEnd::RoomClosed;
+                            }
+                            Ok(ServerMessage::Pong {
+                                client_time_ms,
+                                server_time_ms,
+                            }) => {
+                                let now = chrono_now();
+                                let rtt = (now - client_time_ms).max(0) as u32;
+                                // EMA smooth — ignore absurd spikes
+                                let rtt = rtt.min(60_000);
+                                last_rtt_ms = Some(match last_rtt_ms {
+                                    Some(prev) if prev > 0 => {
+                                        ((prev as f64) * 0.65 + (rtt as f64) * 0.35).round() as u32
+                                    }
+                                    _ => rtt,
+                                });
+                                if let Some(smooth) = last_rtt_ms {
+                                    let _ = event_tx.send(SyncEvent::Latency {
+                                        rtt_ms: smooth,
+                                        server_time_ms,
+                                    });
+                                }
                             }
                             Ok(sm) => {
                                 if matches!(sm, ServerMessage::Welcome { .. }) {
@@ -401,6 +451,8 @@ fn map_server(sm: ServerMessage) -> Option<SyncEvent> {
         },
         ServerMessage::Members { members, .. } => SyncEvent::Members { members },
         ServerMessage::Chat { message } => SyncEvent::Chat { message },
+        // Handled inline in the read loop (updates last_rtt)
+        ServerMessage::Pong { .. } => return None,
         ServerMessage::Error { code, message } => SyncEvent::Error { code, message },
         ServerMessage::RoomClosed { reason, message, .. } => SyncEvent::RoomClosed {
             reason,

@@ -29,6 +29,9 @@ pub struct Member {
     pub is_host: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// RTT to room DO (ms), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +93,13 @@ pub enum ClientMessage {
         #[serde(rename = "isPlaying")]
         is_playing: bool,
     },
+    /// Latency probe — server replies with `pong` echoing `clientTimeMs`.
+    Ping {
+        #[serde(rename = "clientTimeMs")]
+        client_time_ms: i64,
+        #[serde(rename = "rttMs", skip_serializing_if = "Option::is_none")]
+        rtt_ms: Option<u32>,
+    },
     SetNickname {
         nickname: String,
     },
@@ -124,6 +134,12 @@ pub enum ServerMessage {
     Chat {
         message: ChatMessage,
     },
+    Pong {
+        #[serde(rename = "clientTimeMs")]
+        client_time_ms: i64,
+        #[serde(rename = "serverTimeMs")]
+        server_time_ms: i64,
+    },
     Error {
         code: String,
         message: String,
@@ -136,9 +152,10 @@ pub enum ServerMessage {
     },
 }
 
-pub fn expected_position_ms(state: &PlaybackState, now_ms: i64) -> f64 {
+pub fn expected_position_ms(state: &PlaybackState, now_ms: i64, host_one_way_ms: f64) -> f64 {
     if !state.is_playing {
         return state.position_ms;
     }
-    (state.position_ms + (now_ms - state.server_anchor_ms) as f64).max(0.0)
+    let lead = host_one_way_ms.max(0.0);
+    (state.position_ms + (now_ms - state.server_anchor_ms) as f64 + lead).max(0.0)
 }

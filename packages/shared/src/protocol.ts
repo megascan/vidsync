@@ -97,6 +97,11 @@ export const memberSchema = z.object({
   isHost: z.boolean(),
   /** Optional for older clients. */
   platform: clientPlatformSchema.optional(),
+  /**
+   * Last measured RTT to the room DO (ms), client-reported via `ping`.
+   * Used for host one-way lag correction + UI.
+   */
+  rttMs: z.number().int().nonnegative().max(60_000).optional(),
 });
 
 export type Member = z.infer<typeof memberSchema>;
@@ -118,6 +123,15 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
       .max(64)
       .regex(/^[A-Za-z0-9_-]+$/)
       .optional(),
+  }),
+  /**
+   * Latency probe. Server echoes `clientTimeMs` in `pong`.
+   * Optional `rttMs` is the client's last measured RTT (for member list).
+   */
+  z.object({
+    type: z.literal("ping"),
+    clientTimeMs: z.number().int().nonnegative(),
+    rttMs: z.number().int().nonnegative().max(60_000).optional(),
   }),
   z.object({
     type: z.literal("set_url"),
@@ -212,6 +226,12 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("chat"),
     message: chatMessageSchema,
   }),
+  /** Echo for RTT + clock sync. `rttMs = now - clientTimeMs` on client. */
+  z.object({
+    type: z.literal("pong"),
+    clientTimeMs: z.number().int().nonnegative(),
+    serverTimeMs: z.number().int().nonnegative(),
+  }),
   z.object({
     type: z.literal("error"),
     code: z.string(),
@@ -243,12 +263,22 @@ export const createRoomBodySchema = z.object({
 
 export type CreateRoomBody = z.infer<typeof createRoomBodySchema>;
 
+/**
+ * Expected media position at `nowMs` (server clock).
+ * `hostOneWayMs` ≈ host RTT/2 — position was sampled on the host before the
+ * packet reached the DO, so while playing we lead by that amount.
+ */
 export function expectedPositionMs(
   state: Pick<PlaybackState, "isPlaying" | "positionMs" | "serverAnchorMs">,
   nowMs: number,
+  hostOneWayMs: number = 0,
 ): number {
   if (!state.isPlaying) return state.positionMs;
-  return Math.max(0, state.positionMs + (nowMs - state.serverAnchorMs));
+  const lead = Number.isFinite(hostOneWayMs) ? Math.max(0, hostOneWayMs) : 0;
+  return Math.max(
+    0,
+    state.positionMs + (nowMs - state.serverAnchorMs) + lead,
+  );
 }
 
 export function emptyPlaybackState(nowMs: number): PlaybackState {

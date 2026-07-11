@@ -534,7 +534,7 @@ button.sm {
   font-size: 0.88rem;
 }
 
-.people li > span:not(.os-badge):not(.tag) {
+.people li > span:not(.os-badge):not(.tag):not(.ping) {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -550,7 +550,36 @@ button.sm {
   font-size: 0.68rem;
   color: var(--accent);
   font-weight: 600;
+  flex-shrink: 0;
+}
+
+.people .ping {
+  flex-shrink: 0;
   margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--faint);
+  min-width: 2.6em;
+  text-align: right;
+}
+
+.people .ping.good {
+  color: var(--accent);
+}
+
+.people .ping.ok {
+  color: #eab308;
+}
+
+.people .ping.bad {
+  color: var(--danger);
+}
+
+.people .ping.faint {
+  color: var(--faint);
+  font-weight: 500;
 }
 
 .os-badge {

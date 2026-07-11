@@ -28,6 +28,10 @@ type SessionAttachment = {
    * sockets so the people list doesn't stack duplicates.
    */
   clientKey?: string;
+  /** Last client-measured RTT to this DO (ms). */
+  rttMs?: number;
+  /** Last time we broadcast members because rtt changed. */
+  lastRttBroadcastMs?: number;
 };
 
 type StoredRoom = {
@@ -406,6 +410,47 @@ export class Room extends DurableObject<Env> {
       this.broadcastMembers();
       await this.touch();
       await this.scheduleMaintenanceAlarm();
+      return;
+    }
+
+    // Ping is allowed only after hello (need a listed member for rtt).
+    if (msg.type === "ping") {
+      if (!session.helloDone) {
+        this.send(ws, {
+          type: "error",
+          code: "hello_required",
+          message: "Send hello first",
+        });
+        return;
+      }
+      const now = Date.now();
+      const prev = session.rttMs;
+      if (typeof msg.rttMs === "number" && Number.isFinite(msg.rttMs)) {
+        session.rttMs = Math.max(0, Math.min(60_000, Math.round(msg.rttMs)));
+      }
+      ws.serializeAttachment(session);
+      this.sessions.set(ws, session);
+
+      this.send(ws, {
+        type: "pong",
+        clientTimeMs: msg.clientTimeMs,
+        serverTimeMs: now,
+      });
+
+      // Publish ping to room when it moves meaningfully (avoid spam)
+      const changed =
+        session.rttMs != null &&
+        (prev == null || Math.abs(session.rttMs - prev) >= 12);
+      const due =
+        !session.lastRttBroadcastMs ||
+        now - session.lastRttBroadcastMs >= 8_000;
+      if (session.rttMs != null && (changed || due)) {
+        session.lastRttBroadcastMs = now;
+        ws.serializeAttachment(session);
+        this.sessions.set(ws, session);
+        this.broadcastMembers();
+      }
+      await this.touch();
       return;
     }
 
@@ -858,6 +903,9 @@ export class Room extends DurableObject<Env> {
           ? {
               platform: session.platform as Member["platform"],
             }
+          : {}),
+        ...(session.rttMs != null && session.rttMs >= 0
+          ? { rttMs: session.rttMs }
           : {}),
       });
     };

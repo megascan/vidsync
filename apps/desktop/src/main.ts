@@ -11,6 +11,8 @@ type Member = {
   nickname: string;
   isHost: boolean;
   platform?: "windows" | "linux" | "macos" | "web" | "unknown" | string;
+  /** RTT to room DO (ms), when measured. */
+  rttMs?: number;
 };
 
 type MediaSettings = {
@@ -72,6 +74,7 @@ type SyncEvent =
         serverTimeMs: number;
       };
     }
+  | { kind: "latency"; rtt_ms: number; server_time_ms: number }
   | { kind: "error"; code: string; message: string }
   | { kind: "room_closed"; reason: string; message: string };
 
@@ -96,14 +99,37 @@ function normalizeMembers(raw: unknown): Member[] {
     if (!sessionId || seen.has(sessionId)) continue;
     seen.add(sessionId);
     const platform = pick<string>(o, "platform");
+    const rttRaw = pick<unknown>(o, "rttMs", "rtt_ms");
+    const rttMs =
+      typeof rttRaw === "number" && Number.isFinite(rttRaw)
+        ? Math.round(rttRaw)
+        : typeof rttRaw === "string" && rttRaw.trim()
+          ? Math.round(Number(rttRaw))
+          : undefined;
     out.push({
       sessionId,
       nickname: String(pick(o, "nickname") ?? "viewer"),
       isHost: Boolean(pick(o, "isHost", "is_host")),
       ...(platform ? { platform } : {}),
+      ...(rttMs != null && Number.isFinite(rttMs) && rttMs >= 0
+        ? { rttMs }
+        : {}),
     });
   }
   return out;
+}
+
+function formatPing(rttMs: number | undefined): string {
+  if (rttMs == null || !Number.isFinite(rttMs) || rttMs < 0) return "—";
+  if (rttMs < 1000) return `${Math.round(rttMs)}ms`;
+  return `${(rttMs / 1000).toFixed(1)}s`;
+}
+
+function pingClass(rttMs: number | undefined): string {
+  if (rttMs == null || !Number.isFinite(rttMs)) return "ping faint";
+  if (rttMs < 80) return "ping good";
+  if (rttMs < 180) return "ping ok";
+  return "ping bad";
 }
 
 function peopleListHtml(list: Member[]): string {
@@ -111,10 +137,13 @@ function peopleListHtml(list: Member[]): string {
     list
       .map((m) => {
         const you = m.sessionId === sessionId;
+        // Prefer live local sample for "you"
+        const rtt = you && myRttMs > 0 ? myRttMs : m.rttMs;
         return `<li>
           ${platformBadge(m.platform)}
           <span class="${you ? "you" : ""}">${escapeHtml(m.nickname)}${you ? " (you)" : ""}</span>
           ${m.isHost ? `<span class="tag">host</span>` : ""}
+          <span class="${pingClass(rtt)}" title="RTT to room server">${escapeHtml(formatPing(rtt))}</span>
         </li>`;
       })
       .join("") || `<li class="empty">…</li>`
@@ -158,6 +187,8 @@ const FOLLOWER_HARD_DRIFT_SEC = 4;
 /** Soft catch-up rate tweak band. */
 const FOLLOWER_SOFT_DRIFT_SEC = 1.5;
 let clockOffsetMs = 0;
+/** Local RTT to room DO (ms), EMA-smoothed from latency events. */
+let myRttMs = 0;
 let applyingRemote = false;
 let lastVersion = -1;
 let chatDraft = "";
@@ -191,9 +222,27 @@ function nowServer(): number {
   return Date.now() + clockOffsetMs;
 }
 
+/** Host one-way lag ≈ host RTT/2 (packet in flight while media advanced). */
+function hostOneWayMs(): number {
+  const host = members.find((m) => m.isHost);
+  const rtt =
+    host && host.sessionId === sessionId && myRttMs > 0
+      ? myRttMs
+      : (host?.rttMs ?? 0);
+  if (!Number.isFinite(rtt) || rtt <= 0) return 0;
+  return rtt / 2;
+}
+
+/**
+ * Target media position on the host timeline.
+ * + hostOneWay: host position was sampled before the DO stamped the anchor.
+ */
 function expectedPos(state: PlaybackState): number {
   if (!state.isPlaying) return state.positionMs;
-  return Math.max(0, state.positionMs + (nowServer() - state.serverAnchorMs));
+  return Math.max(
+    0,
+    state.positionMs + (nowServer() - state.serverAnchorMs) + hostOneWayMs(),
+  );
 }
 
 function setStatus(s: string) {
@@ -227,8 +276,24 @@ function toast(s: string) {
   }, 2200);
 }
 
-function applyClock(serverTimeMs: number) {
-  clockOffsetMs = serverTimeMs - Date.now();
+function applyClock(serverTimeMs: number, rttMs?: number) {
+  // Cristian-style: server time at arrival ≈ serverTimeMs + one-way
+  const oneWay =
+    rttMs != null && Number.isFinite(rttMs) && rttMs >= 0 ? rttMs / 2 : 0;
+  clockOffsetMs = serverTimeMs + oneWay - Date.now();
+}
+
+function applyLatency(rttMs: number, serverTimeMs: number) {
+  const rtt = Math.max(0, Math.min(60_000, Math.round(rttMs)));
+  myRttMs =
+    myRttMs > 0
+      ? Math.round(myRttMs * 0.65 + rtt * 0.35)
+      : rtt;
+  applyClock(serverTimeMs, myRttMs);
+  // Soft-update people list ping without full repaint thrash
+  if (screen === "room") {
+    softPaintRoom();
+  }
 }
 
 function hasMedia(): boolean {
@@ -839,6 +904,13 @@ function normalizeEvent(raw: unknown): SyncEvent | null {
       members: normalizeMembers(pick(o, "members")),
     };
   }
+  if (kind === "latency") {
+    return {
+      kind: "latency",
+      rtt_ms: Number(pick(o, "rtt_ms", "rttMs") ?? 0),
+      server_time_ms: Number(pick(o, "server_time_ms", "serverTimeMs") ?? 0),
+    };
+  }
   if (kind === "chat") {
     const message = pick<Record<string, unknown>>(o, "message") ?? o;
     return {
@@ -921,7 +993,8 @@ async function onSync(raw: unknown) {
       sessionId = ev.session_id;
       isHost = ev.is_host;
       members = ev.members;
-      applyClock(ev.server_time_ms);
+      // Rough clock until first latency pong (no RTT yet)
+      applyClock(ev.server_time_ms, myRttMs > 0 ? myRttMs : undefined);
       // Switch shell first so <video> has a live mount before we load media.
       // Join-while-playing used to load then paint() and WebKitGTK often died.
       screen = "room";
@@ -931,8 +1004,11 @@ async function onSync(raw: unknown) {
       await applyState(ev.state, true);
       break;
     case "state":
-      applyClock(ev.server_time_ms);
+      applyClock(ev.server_time_ms, myRttMs > 0 ? myRttMs : undefined);
       await applyState(ev.state, false);
+      break;
+    case "latency":
+      applyLatency(ev.rtt_ms, ev.server_time_ms);
       break;
     case "members":
       members = ev.members;
@@ -970,6 +1046,8 @@ async function kickHome(message: string) {
   playback = null;
   chat = [];
   streamInfo = null;
+  myRttMs = 0;
+  clockOffsetMs = 0;
   video.removeAttribute("src");
   while (video.firstChild) video.removeChild(video.firstChild);
   video.load();
@@ -1042,6 +1120,8 @@ async function doLeave() {
   playback = null;
   chat = [];
   streamInfo = null;
+  myRttMs = 0;
+  clockOffsetMs = 0;
   status = "";
   error = "";
   video.removeAttribute("src");

@@ -13,13 +13,28 @@ Wire: JSON text over WebSocket. Schemas: `packages/shared`.
 - `updatedAtMs`
 
 Expected position while playing:
-`positionMs + (nowMs - serverAnchorMs)` (client may subtract RTT/2).
+`positionMs + (nowMs - serverAnchorMs) + hostOneWayMs`
+
+`hostOneWayMs ≈ host.rttMs / 2` — host sampled position before the packet
+hit the DO; media advanced that much while in flight.
+
+## Latency (`ping` / `pong`)
+
+| Dir | Msg | Fields |
+|---|---|---|
+| C→S | `ping` | `clientTimeMs`, optional `rttMs` (last measured) |
+| S→C | `pong` | `clientTimeMs` (echo), `serverTimeMs` |
+
+Client RTT: `now - clientTimeMs`. Clock: `offset ≈ serverTimeMs + RTT/2 - now`.  
+Server stores `rttMs` on the session and includes it on `members` (throttled broadcast).
+
+Desktop pings every ~2s (plus one right after hello).
 
 ## Client → server
-`hello`, `queue_add`, `queue_remove`, `queue_play`, `queue_clear`, `set_url`, `play`, `pause`, `seek`, `heartbeat`, `transfer_host`, `set_nickname`, `chat`
+`hello`, `ping`, `queue_add`, `queue_remove`, `queue_play`, `queue_clear`, `set_url`, `play`, `pause`, `seek`, `heartbeat`, `transfer_host`, `set_nickname`, `chat`
 
 ## Server → client
-`welcome`, `state`, `members`, `chat`, `error`
+`welcome`, `state`, `members`, `pong`, `chat`, `error`
 
 ## Chat (stateless)
 - `chat` is broadcast-only — not written to DO storage
