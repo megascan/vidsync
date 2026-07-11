@@ -218,9 +218,30 @@ const video = document.createElement("video");
 video.playsInline = true;
 video.controls = true;
 video.preload = "auto";
-video.setAttribute("controlsList", "nodownload");
+video.setAttribute("controlsList", "nodownload noplaybackrate");
 // Do NOT set crossOrigin — WebKitGTK + ranged HTTP streams often fail silently
 // with CORS mode "anonymous" even when ACAO:* is present.
+
+/** Host has full controls; followers keep volume/fullscreen only (seek/pause locked). */
+function applyMediaControlMode() {
+  if (isHost) {
+    video.classList.remove("follower-locked");
+    video.controls = hasMedia() || video.parentElement != null;
+    try {
+      video.disableRemotePlayback = false;
+    } catch {
+      /* */
+    }
+  } else {
+    video.classList.add("follower-locked");
+    video.controls = hasMedia() || video.parentElement != null;
+    try {
+      video.disableRemotePlayback = true;
+    } catch {
+      /* */
+    }
+  }
+}
 
 function nowServer(): number {
   return Date.now() + clockOffsetMs;
@@ -557,6 +578,7 @@ function ensureVideoMounted() {
   if (!mount) return;
   mount.querySelector(".video-empty")?.remove();
   video.controls = true;
+  applyMediaControlMode();
   if (video.parentElement !== mount) {
     mount.appendChild(video);
   }
@@ -919,6 +941,77 @@ function wireVideoHostEvents() {
       isPlaying: !video.paused,
     });
   };
+
+  // Followers: host is authority — undo local pause / play / scrub / rate.
+  video.addEventListener("pause", () => {
+    if (isHost || applyingRemote || screen !== "room") return;
+    if (playback?.isPlaying) {
+      applyingRemote = true;
+      void safePlay().finally(() => {
+        applyingRemote = false;
+      });
+    }
+  });
+  video.addEventListener("play", () => {
+    if (isHost || applyingRemote || screen !== "room") return;
+    if (playback && !playback.isPlaying) {
+      applyingRemote = true;
+      try {
+        video.pause();
+      } catch {
+        /* */
+      }
+      applyingRemote = false;
+    }
+  });
+  video.addEventListener("seeked", () => {
+    if (isHost || applyingRemote || screen !== "room" || !playback) return;
+    const target = expectedPos(playback) / 1000;
+    if (!Number.isFinite(target)) return;
+    if (Math.abs((video.currentTime || 0) - target) < 1.25) return;
+    applyingRemote = true;
+    void safeSeek(target, applyGen).finally(() => {
+      applyingRemote = false;
+    });
+  });
+  video.addEventListener("ratechange", () => {
+    if (isHost || applyingRemote) return;
+    // Soft catch-up uses 0.94–1.06; only kill big user knobs
+    const r = video.playbackRate;
+    if (r < 0.9 || r > 1.1) {
+      try {
+        video.playbackRate = 1;
+      } catch {
+        /* */
+      }
+    }
+  });
+  video.addEventListener(
+    "keydown",
+    (e) => {
+      if (isHost) return;
+      const k = e.key;
+      if (
+        k === " " ||
+        k === "Spacebar" ||
+        k === "k" ||
+        k === "K" ||
+        k === "j" ||
+        k === "J" ||
+        k === "l" ||
+        k === "L" ||
+        k === "ArrowLeft" ||
+        k === "ArrowRight" ||
+        k === "MediaPlayPause" ||
+        k === "MediaTrackNext" ||
+        k === "MediaTrackPrevious"
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    true,
+  );
 }
 
 // Host keepalive every 5s while in room (playing OR paused).
@@ -1854,6 +1947,8 @@ function softPaintRoom() {
     pill.className = `pill ${isHost ? "host" : "viewer"}`;
     pill.textContent = isHost ? "Host" : "Watching";
   }
+
+  applyMediaControlMode();
 
   // Host controls stay locked while FFmpeg runs
   if (isHost) {

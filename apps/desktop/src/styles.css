@@ -359,6 +359,23 @@ input:disabled {
   background: #000;
 }
 
+/* Followers: host owns timeline — mute seek/play chrome (volume ok). */
+video.follower-locked::-webkit-media-controls-timeline,
+video.follower-locked::-webkit-media-controls-seek-back-button,
+video.follower-locked::-webkit-media-controls-seek-forward-button,
+video.follower-locked::-webkit-media-controls-current-time-display,
+video.follower-locked::-webkit-media-controls-time-remaining-display,
+video.follower-locked::-webkit-media-controls-play-button,
+video.follower-locked::-webkit-media-controls-overlay-play-button {
+  pointer-events: none !important;
+  opacity: 0.28;
+}
+
+/* Chromium / WebView2 */
+video.follower-locked::-webkit-media-controls-enclosure {
+  /* keep bar for volume */
+}
+
 .video-empty {
   position: absolute;
   inset: 0;
