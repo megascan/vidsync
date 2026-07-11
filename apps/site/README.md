@@ -11,7 +11,7 @@ bunx wrangler dev
 
 ## Deploy
 
-Requires R2 bucket `vidsync-releases` + CF API token (see `DOCS/ci-release.md`).
+Requires R2 bucket `vidsync` (see `DOCS/ci-release.md`).
 
 ```bash
 bunx wrangler deploy

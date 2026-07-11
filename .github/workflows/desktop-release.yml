@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 env:
-  R2_BUCKET: vidsync-releases
+  R2_BUCKET: vidsync
 
 jobs:
   build:

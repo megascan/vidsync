@@ -4,7 +4,7 @@ On every push to `master` (when desktop/site change), GitHub Actions:
 
 1. Builds **Windows** (NSIS + MSI) and **Linux** (AppImage + deb)
 2. Signs updater artifacts with minisign (`TAURI_SIGNING_PRIVATE_KEY`)
-3. Uploads binaries + `.sig` to R2 bucket `vidsync-releases`
+3. Uploads binaries + `.sig` to R2 bucket `vidsync`
 4. Writes `latest.json` (landing) + `updater.json` (Tauri static endpoint)
 5. Deploys landing Worker to **vidsync.ratt.ing**
 
@@ -17,12 +17,12 @@ Workflow: `.github/workflows/desktop-release.yml`
 ```bash
 cd apps/site
 bun install
-bunx wrangler r2 bucket create vidsync-releases
+bunx wrangler r2 bucket create vidsync
 ```
 
 ### 2. R2 S3 API token (binaries)
 
-R2 → **Manage R2 API Tokens** → Create → Object Read & Write on `vidsync-releases`.
+R2 → **Manage R2 API Tokens** → Create → Object Read & Write on `vidsync`.
 
 Copy Access Key ID + Secret Access Key once (secret not shown again).
 
@@ -51,7 +51,7 @@ That is Workers deploy API, not R2 S3. Not part of the release workflow.
 
 ### 5. Domain
 
-`vidsync.ratt.ing` → Worker `vidsync-web` (R2 binding `vidsync-releases`).
+`vidsync.ratt.ing` → Worker `vidsync-web` (R2 binding bucket `vidsync`).
 
 ## Updater signing keys
 

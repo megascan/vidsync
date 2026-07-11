@@ -21,7 +21,7 @@
   "r2_buckets": [
     {
       "binding": "DOWNLOADS",
-      "bucket_name": "vidsync-releases"
+      "bucket_name": "vidsync"
     }
   ],
   "routes": [
