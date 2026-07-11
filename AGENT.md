@@ -3,7 +3,7 @@
 Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsync`).
 
 ## Stack
-- `apps/host` — Rust desktop: lobby, DO sync, local HTTP stream, UPnP, mpv player
+- `apps/host` — Rust desktop: lobby, DO sync, local HTTP stream, UPnP, native WebView player
 - `workers/api` — CF Worker + Durable Object (`Room`) WebSocket hibernation
 - `packages/shared` — protocol zod schemas (TS); Rust mirrors in `apps/host/src/protocol.rs`
 - `apps/web` — **legacy** Astro lobby (optional)
@@ -14,7 +14,7 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 - Host-authoritative sync. One DO per room code (`getByName`).
 - Desktop-first: no browser required for create/join/play.
 - Desktop create: header `X-VidSync-Client: desktop/<version>` (no Turnstile).
-- Video: host serves local file or any http(s) URL in queue; peers use mpv.
+- Video: host serves local file or any http(s) URL in queue; peers play in system WebView (no mpv).
 - Document decisions in `DOCS/`. Debt in `TECH_DEBT.md`.
 
 ## Commands

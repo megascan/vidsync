@@ -14,7 +14,7 @@ cargo run --release
 
 - Create / join room (no browser)
 - Host: stream a local video (HTTP + optional UPnP + public IP)
-- Playback in **mpv** (install [mpv](https://mpv.io) or drop `mpv.exe` next to the binary)
+- Playback in a **native player window** (system WebView — no extra app downloads)
 - Host Play/Pause syncs the room
 
 See `apps/host/README.md` and `DOCS/desktop.md`.

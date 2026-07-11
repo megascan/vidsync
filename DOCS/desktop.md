@@ -7,7 +7,8 @@ Primary client is the **Rust app** (`apps/host` → binary `vidsync`).
 - egui UI (create/join lobby, queue, chat, host controls)
 - WebSocket sync → `workers/api` Room Durable Object (same protocol as web)
 - Local HTTP Range server + UPnP + public IP probe
-- **mpv** external player (IPC) — no page CORS, no extension
+- **System WebView player** (`wry` + `tao`) — WebView2 / WKWebView / WebKitGTK  
+  No mpv/ffmpeg download. OS codecs. Platform-agnostic.
 
 ## Auth / create
 

@@ -1,4 +1,4 @@
-//! VidSync desktop — home lobby + room (sync, stream, mpv).
+//! VidSync desktop — home lobby + room (sync, stream, native WebView player).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use tokio::runtime::Runtime;
 
-use crate::player::{self, MpvPlayer};
+use crate::player::{NativePlayer, PlayerUserEvent};
 use crate::protocol::{expected_position_ms, ClientMessage, Member, PlaybackState};
 use crate::session::{ServeOptions, ServeSession};
 use crate::sync::{self, SyncEvent, SyncHandle};
@@ -143,9 +143,8 @@ struct App {
     pending_join: Option<Receiver<Result<SyncHandle, String>>>,
     pending_file: Option<Receiver<Result<Box<ServeSession>, String>>>,
     pending_stop_file: Option<Receiver<()>>,
-    // player
-    mpv: Option<MpvPlayer>,
-    mpv_ok: bool,
+    // player (system WebView — no mpv)
+    player: Option<NativePlayer>,
     last_applied_version: i64,
     last_hb: Instant,
     copied_flash: Option<Instant>,
@@ -181,8 +180,7 @@ impl App {
             pending_join: None,
             pending_file: None,
             pending_stop_file: None,
-            mpv: None,
-            mpv_ok: player::mpv_available(),
+            player: None,
             last_applied_version: -1,
             last_hb: Instant::now() - Duration::from_secs(10),
             copied_flash: None,
@@ -198,18 +196,20 @@ impl App {
         local + self.clock_offset_ms
     }
 
-    fn ensure_mpv(&mut self) {
-        if self.mpv.is_some() {
-            return;
+    fn ensure_player(&mut self) {
+        if let Some(p) = &self.player {
+            if p.is_alive() {
+                p.show();
+                return;
+            }
         }
-        match MpvPlayer::start() {
+        match NativePlayer::start() {
             Ok(p) => {
-                self.mpv = Some(p);
-                self.mpv_ok = true;
-                self.status = "mpv player ready.".into();
+                self.player = Some(p);
+                self.status = "Player ready (system WebView).".into();
+                self.error = None;
             }
             Err(e) => {
-                self.mpv_ok = false;
                 self.error = Some(format!("{e:#}"));
             }
         }
@@ -235,7 +235,7 @@ impl App {
             self.pending_stop_file = Some(rx);
             self.busy = true;
         }
-        self.mpv = None;
+        self.player = None;
         self.room_code = None;
         self.session_id = None;
         self.is_host = false;
@@ -260,7 +260,7 @@ impl App {
                     self.pending_create = None;
                     self.status = format!("Room {code} — share code with friends.");
                     self.error = None;
-                    self.ensure_mpv();
+                    self.ensure_player();
                 }
                 Ok(Err(e)) => {
                     self.error = Some(e);
@@ -283,7 +283,7 @@ impl App {
                     self.pending_join = None;
                     self.status = "Joined room.".into();
                     self.error = None;
-                    self.ensure_mpv();
+                    self.ensure_player();
                 }
                 Ok(Err(e)) => {
                     self.error = Some(e);
@@ -317,9 +317,9 @@ impl App {
                             });
                         }
                     }
-                    self.ensure_mpv();
-                    if let Some(mpv) = &self.mpv {
-                        let _ = mpv.load_url(&url);
+                    self.ensure_player();
+                    if let Some(p) = &self.player {
+                        let _ = p.load_url(&url);
                     }
                     self.copy_text_silent(&url);
                 }
@@ -353,8 +353,39 @@ impl App {
             self.on_sync(ev);
         }
 
+        // host used controls inside the player window
+        self.drain_player_user_events();
+
         // host heartbeat + follower drift
         self.tick_playback();
+    }
+
+    fn drain_player_user_events(&mut self) {
+        if !self.is_host {
+            return;
+        }
+        let Some(player) = &self.player else { return };
+        let events = player.drain_user_events();
+        for ev in events {
+            let Some(sync) = &self.sync else { continue };
+            match ev {
+                PlayerUserEvent::Play { position_ms } => {
+                    sync.send(ClientMessage::Play { position_ms });
+                }
+                PlayerUserEvent::Pause { position_ms } => {
+                    sync.send(ClientMessage::Pause { position_ms });
+                }
+                PlayerUserEvent::Seek {
+                    position_ms,
+                    is_playing,
+                } => {
+                    sync.send(ClientMessage::Seek {
+                        position_ms,
+                        is_playing,
+                    });
+                }
+            }
+        }
     }
 
     fn copy_text_silent(&mut self, text: &str) {
@@ -437,19 +468,19 @@ impl App {
         self.last_applied_version = version;
 
         // Followers always apply; host only on force (welcome) or URL change from queue
-        let should_drive_mpv = !self.is_host || force || url_changed;
+        let should_drive = !self.is_host || force || url_changed;
 
-        if should_drive_mpv {
+        if should_drive {
             if let Some(url) = state.video_url.clone() {
-                self.ensure_mpv();
-                if let Some(mpv) = &self.mpv {
+                self.ensure_player();
+                if let Some(p) = &self.player {
                     let now = self.now_server_ms();
                     let pos = expected_position_ms(&state, now);
                     if url_changed || force {
-                        let _ = mpv.load_url(&url);
+                        let _ = p.load_url(&url);
                     }
-                    let _ = mpv.seek_seconds(pos / 1000.0);
-                    let _ = mpv.set_pause(!state.is_playing);
+                    let _ = p.seek_seconds(pos / 1000.0);
+                    let _ = p.set_pause(!state.is_playing);
                 }
             }
         }
@@ -467,20 +498,19 @@ impl App {
                 return;
             }
             self.last_hb = Instant::now();
-            if let (Some(state), Some(mpv)) = (self.playback.as_ref(), self.mpv.as_ref()) {
-                if mpv.applying_remote() {
+            if let (Some(state), Some(p)) = (self.playback.as_ref(), self.player.as_ref()) {
+                if p.applying_remote() {
                     return;
                 }
-                if let Some(url) = &state.video_url {
+                if state.video_url.is_some() {
                     let now = self.now_server_ms();
                     let target = expected_position_ms(state, now);
-                    if let Ok(cur) = mpv.time_pos_ms() {
+                    if let Ok(cur) = p.time_pos_ms() {
                         if (cur - target).abs() > 450.0 {
-                            let _ = mpv.seek_seconds(target / 1000.0);
+                            let _ = p.seek_seconds(target / 1000.0);
                         }
                     }
-                    let _ = mpv.set_pause(!state.is_playing);
-                    let _ = url;
+                    let _ = p.set_pause(!state.is_playing);
                 }
             }
             return;
@@ -495,9 +525,9 @@ impl App {
         if !playing {
             return;
         }
-        if let (Some(mpv), Some(sync)) = (self.mpv.as_ref(), self.sync.as_ref()) {
-            if let Ok(pos) = mpv.time_pos_ms() {
-                let paused = mpv.is_paused().unwrap_or(false);
+        if let (Some(p), Some(sync)) = (self.player.as_ref(), self.sync.as_ref()) {
+            if let Ok(pos) = p.time_pos_ms() {
+                let paused = p.is_paused().unwrap_or(false);
                 sync.send(ClientMessage::Heartbeat {
                     position_ms: pos,
                     is_playing: !paused,
@@ -511,12 +541,12 @@ impl App {
             return;
         }
         let pos = self
-            .mpv
+            .player
             .as_ref()
             .and_then(|m| m.time_pos_ms().ok())
             .unwrap_or(0.0);
-        if let Some(mpv) = &self.mpv {
-            let _ = mpv.set_pause(false);
+        if let Some(p) = &self.player {
+            let _ = p.set_pause(false);
         }
         if let Some(sync) = &self.sync {
             sync.send(ClientMessage::Play { position_ms: pos });
@@ -528,12 +558,12 @@ impl App {
             return;
         }
         let pos = self
-            .mpv
+            .player
             .as_ref()
             .and_then(|m| m.time_pos_ms().ok())
             .unwrap_or(0.0);
-        if let Some(mpv) = &self.mpv {
-            let _ = mpv.set_pause(true);
+        if let Some(p) = &self.player {
+            let _ = p.set_pause(true);
         }
         if let Some(sync) = &self.sync {
             sync.send(ClientMessage::Pause { position_ms: pos });
@@ -673,11 +703,9 @@ impl App {
 
         ui.add_space(16.0);
         ui.label(
-            RichText::new(if self.mpv_ok {
-                "mpv found — video will open in mpv window."
-            } else {
-                "mpv not on PATH — install mpv for playback (lobby still works)."
-            })
+            RichText::new(
+                "Player uses the system WebView (WebView2 / WKWebView / WebKit) — no extra downloads.",
+            )
             .small()
             .color(Color32::from_rgb(140, 145, 160)),
         );
@@ -854,25 +882,25 @@ impl App {
                 {
                     self.host_pause();
                 }
-                if ui.button("Open mpv").clicked() {
-                    self.ensure_mpv();
+                if ui.button("Show player").clicked() {
+                    self.ensure_player();
                 }
             });
         } else {
             ui.label(
-                RichText::new("Host controls playback. Video opens in mpv.")
+                RichText::new("Host controls playback. Video opens in the player window.")
                     .small()
                     .color(Color32::from_rgb(140, 145, 160)),
             );
-            if ui.button("Open / focus mpv").clicked() {
-                self.ensure_mpv();
+            if ui.button("Show player").clicked() {
+                self.ensure_player();
                 if let Some(pb) = &self.playback {
                     if let Some(url) = &pb.video_url {
-                        if let Some(mpv) = &self.mpv {
+                        if let Some(p) = &self.player {
                             let pos = expected_position_ms(pb, self.now_server_ms());
-                            let _ = mpv.load_url(url);
-                            let _ = mpv.seek_seconds(pos / 1000.0);
-                            let _ = mpv.set_pause(!pb.is_playing);
+                            let _ = p.load_url(url);
+                            let _ = p.seek_seconds(pos / 1000.0);
+                            let _ = p.set_pause(!pb.is_playing);
                         }
                     }
                 }

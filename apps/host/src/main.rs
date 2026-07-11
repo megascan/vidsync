@@ -1,4 +1,4 @@
-//! VidSync desktop — lobby, DO sync, local stream, mpv player.
+//! VidSync desktop — lobby, DO sync, local stream, native WebView player.
 //! Also keeps headless `serve` for scripting.
 
 mod api;
@@ -22,7 +22,7 @@ use session::{ServeOptions, ServeSession};
 #[command(
     name = "vidsync",
     version,
-    about = "VidSync desktop watch party (lobby + stream + mpv). GUI by default."
+    about = "VidSync desktop watch party (lobby + stream + native player). GUI by default."
 )]
 struct Cli {
     #[command(subcommand)]
