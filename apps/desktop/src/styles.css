@@ -37,6 +37,9 @@ button {
   color: var(--text);
   border-radius: 8px;
   padding: 0.45rem 0.75rem;
+  pointer-events: auto;
+  position: relative;
+  z-index: 1;
 }
 
 button.primary {

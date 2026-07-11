@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import "./styles.css";
 
 type Member = {
   sessionId: string;
@@ -396,7 +397,91 @@ async function doChat() {
 }
 
 function copy(text: string) {
-  void navigator.clipboard.writeText(text).then(() => setStatus("Copied"));
+  void navigator.clipboard.writeText(text).then(() => {
+    status = "Copied";
+    error = "";
+    const el = app.querySelector(".status");
+    if (el) el.textContent = status;
+    else paint();
+  });
+}
+
+/** Event delegation — survives full re-renders without dead buttons. */
+function bindUiOnce() {
+  app.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest("button");
+    if (!btn || btn.hasAttribute("disabled")) return;
+    switch (btn.id) {
+      case "create":
+        void doCreate();
+        break;
+      case "joinBtn":
+        void doJoin();
+        break;
+      case "leave":
+        void doLeave();
+        break;
+      case "copyCode":
+        copy(roomCode);
+        break;
+      case "stream":
+        void doStreamFile();
+        break;
+      case "play":
+        void video.play();
+        void invoke("host_play", {
+          positionMs: (video.currentTime || 0) * 1000,
+        });
+        break;
+      case "pause":
+        video.pause();
+        void invoke("host_pause", {
+          positionMs: (video.currentTime || 0) * 1000,
+        });
+        break;
+      case "copyUrl":
+        if (streamInfo) copy(streamInfo.publicUrl ?? streamInfo.lanUrl);
+        break;
+      case "send":
+        void doChat();
+        break;
+      default:
+        break;
+    }
+  });
+
+  app.addEventListener("input", (e) => {
+    const el = e.target;
+    if (!(el instanceof HTMLInputElement)) return;
+    if (el.id === "nick") {
+      nick = el.value;
+      const create = app.querySelector<HTMLButtonElement>("#create");
+      if (create) create.disabled = busy || !nick.trim();
+    } else if (el.id === "api") {
+      apiBase = el.value;
+    } else if (el.id === "join") {
+      joinCode = el.value;
+      const joinBtn = app.querySelector<HTMLButtonElement>("#joinBtn");
+      if (joinBtn) joinBtn.disabled = busy || joinCode.trim().length < 6;
+    } else if (el.id === "port") {
+      port = el.value;
+    } else if (el.id === "chat") {
+      chatDraft = el.value;
+    }
+  });
+
+  app.addEventListener("change", (e) => {
+    const t = e.target as HTMLInputElement;
+    if (t.id === "upnp") useUpnp = t.checked;
+  });
+
+  app.addEventListener("keydown", (e) => {
+    const t = e.target as HTMLElement;
+    if (e.key === "Enter" && t.id === "chat") {
+      e.preventDefault();
+      void doChat();
+    }
+  });
 }
 
 function paint() {
@@ -413,30 +498,17 @@ function paint() {
           <label>API</label>
           <input id="api" value="${escapeAttr(apiBase)}" ${busy ? "disabled" : ""} />
         </div>
-        <button class="primary" id="create" ${busy || !nick.trim() ? "disabled" : ""}>Create room</button>
+        <button type="button" class="primary" id="create" ${busy || !nick.trim() ? "disabled" : ""}>Create room</button>
         <div class="field" style="margin-top:0.5rem">
           <label>Or join</label>
           <div class="row">
             <input id="join" placeholder="ROOMCODE" value="${escapeAttr(joinCode)}" ${busy ? "disabled" : ""} />
-            <button id="joinBtn" ${busy || joinCode.trim().length < 6 ? "disabled" : ""}>Join</button>
+            <button type="button" id="joinBtn" ${busy || joinCode.trim().length < 6 ? "disabled" : ""}>Join</button>
           </div>
         </div>
         ${status ? `<p class="status">${escapeHtml(status)}</p>` : ""}
         ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       </div>`;
-
-    app.querySelector<HTMLInputElement>("#nick")!.oninput = (e) => {
-      nick = (e.target as HTMLInputElement).value;
-    };
-    app.querySelector<HTMLInputElement>("#api")!.oninput = (e) => {
-      apiBase = (e.target as HTMLInputElement).value;
-    };
-    app.querySelector<HTMLInputElement>("#join")!.oninput = (e) => {
-      joinCode = (e.target as HTMLInputElement).value;
-      paint();
-    };
-    app.querySelector("#create")!.addEventListener("click", () => void doCreate());
-    app.querySelector("#joinBtn")!.addEventListener("click", () => void doJoin());
     return;
   }
 
@@ -450,8 +522,8 @@ function paint() {
           ${isHost ? `<span class="badge">HOST</span>` : `<span class="muted">viewer</span>`}
         </div>
         <div class="row">
-          <button id="copyCode">Copy code</button>
-          <button id="leave">Leave</button>
+          <button type="button" id="copyCode">Copy code</button>
+          <button type="button" id="leave">Leave</button>
         </div>
       </header>
       <div class="room-body">
@@ -461,11 +533,11 @@ function paint() {
             ${
               isHost
                 ? `
-              <button class="primary" id="stream" ${busy ? "disabled" : ""}>Stream local file…</button>
+              <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>Stream local file…</button>
               <label class="muted"><input type="checkbox" id="upnp" ${useUpnp ? "checked" : ""}/> UPnP</label>
               <input id="port" value="${escapeAttr(port)}" style="width:4.5rem" title="Port" />
-              <button id="play">Play</button>
-              <button id="pause">Pause</button>
+              <button type="button" id="play">Play</button>
+              <button type="button" id="pause">Pause</button>
             `
                 : `<span class="muted">Host controls playback</span>`
             }
@@ -477,7 +549,7 @@ function paint() {
               ? `<div style="padding:0.4rem 0.75rem;background:var(--surface);border-top:1px solid var(--border)">
                   <div class="muted">Stream URL ${streamInfo.upnpMapped ? "(UPnP open)" : "(forward port if remote)"}</div>
                   <div class="mono" id="streamUrl">${escapeHtml(streamInfo.publicUrl ?? streamInfo.lanUrl)}</div>
-                  <button id="copyUrl" style="margin-top:0.35rem">Copy URL</button>
+                  <button type="button" id="copyUrl" style="margin-top:0.35rem">Copy URL</button>
                 </div>`
               : ""
           }
@@ -521,44 +593,15 @@ function paint() {
             </div>
             <div class="row" style="margin-top:0.4rem">
               <input id="chat" placeholder="Message…" value="${escapeAttr(chatDraft)}" />
-              <button id="send">Send</button>
+              <button type="button" id="send">Send</button>
             </div>
           </section>
         </aside>
       </div>
     </div>`;
 
-  const mount = app.querySelector("#videoMount")!;
-  mount.appendChild(video);
-
-  app.querySelector("#copyCode")?.addEventListener("click", () => copy(roomCode));
-  app.querySelector("#leave")?.addEventListener("click", () => void doLeave());
-  app.querySelector("#stream")?.addEventListener("click", () => void doStreamFile());
-  app.querySelector("#upnp")?.addEventListener("change", (e) => {
-    useUpnp = (e.target as HTMLInputElement).checked;
-  });
-  app.querySelector("#port")?.addEventListener("input", (e) => {
-    port = (e.target as HTMLInputElement).value;
-  });
-  app.querySelector("#play")?.addEventListener("click", () => {
-    void video.play();
-    void invoke("host_play", { positionMs: (video.currentTime || 0) * 1000 });
-  });
-  app.querySelector("#pause")?.addEventListener("click", () => {
-    video.pause();
-    void invoke("host_pause", { positionMs: (video.currentTime || 0) * 1000 });
-  });
-  app.querySelector("#copyUrl")?.addEventListener("click", () => {
-    if (streamInfo) copy(streamInfo.publicUrl ?? streamInfo.lanUrl);
-  });
-  const chatInput = app.querySelector<HTMLInputElement>("#chat");
-  chatInput?.addEventListener("input", (e) => {
-    chatDraft = (e.target as HTMLInputElement).value;
-  });
-  chatInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") void doChat();
-  });
-  app.querySelector("#send")?.addEventListener("click", () => void doChat());
+  const mount = app.querySelector("#videoMount");
+  if (mount) mount.appendChild(video);
 
   const log = app.querySelector("#chatLog");
   if (log) log.scrollTop = log.scrollHeight;
@@ -577,6 +620,7 @@ function escapeAttr(s: string): string {
 }
 
 async function boot() {
+  bindUiOnce();
   wireVideoHostEvents();
   try {
     apiBase = await invoke<string>("default_api");
