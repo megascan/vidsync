@@ -116,10 +116,13 @@ jobs:
 
       - name: Collect Linux artifacts
         if: matrix.os_name == 'linux'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           mkdir -p dist-out
           node -p "require('./apps/desktop/package.json').version" > dist-out/VERSION
-          APPIMAGE=$(find apps/desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' 2>/dev/null | head -n1 || true)
+          APPIMAGE=$(find apps/desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' ! -name '*.tar.gz' 2>/dev/null | head -n1 || true)
           DEB=$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' 2>/dev/null | head -n1 || true)
           BIN="apps/desktop/src-tauri/target/release/vidsync-desktop"
           if [ -n "$APPIMAGE" ]; then
@@ -127,7 +130,19 @@ jobs:
             [ -f "${APPIMAGE}.sig" ] && cp "${APPIMAGE}.sig" dist-out/VidSync-linux.AppImage.sig
           fi
           if [ -n "$DEB" ]; then
-            cp "$DEB" dist-out/VidSync-linux.deb
+            # createUpdaterArtifacts may already write .deb.sig; if not, sign explicitly
+            # so linux-x86_64-deb updater key works (deb install + AppImage URL = "invalid updater binary format")
+            DEB_ABS="$(cd "$(dirname "$DEB")" && pwd)/$(basename "$DEB")"
+            if [ ! -f "${DEB_ABS}.sig" ]; then
+              echo "signing deb for updater: $DEB_ABS"
+              (cd apps/desktop && bunx tauri signer sign "$DEB_ABS")
+            fi
+            cp "$DEB_ABS" dist-out/VidSync-linux.deb
+            if [ -f "${DEB_ABS}.sig" ]; then
+              cp "${DEB_ABS}.sig" dist-out/VidSync-linux.deb.sig
+            else
+              echo "::warning::no .deb.sig after sign — deb auto-update will be missing"
+            fi
           fi
           [ -f "$BIN" ] && cp "$BIN" dist-out/VidSync-linux
           ls -la dist-out || true
@@ -210,6 +225,7 @@ jobs:
           stage_lin artifacts/linux/VidSync-linux.AppImage "VidSync-linux-${VERSION}.AppImage"
           stage_lin artifacts/linux/VidSync-linux.AppImage.sig "VidSync-linux-${VERSION}.AppImage.sig"
           stage_lin artifacts/linux/VidSync-linux.deb "VidSync-linux-${VERSION}.deb"
+          stage_lin artifacts/linux/VidSync-linux.deb.sig "VidSync-linux-${VERSION}.deb.sig"
           stage_lin artifacts/linux/VidSync-linux "VidSync-linux-${VERSION}"
 
           if [ -f "stage/downloads/linux/VidSync-linux-${VERSION}.AppImage" ]; then

@@ -40,7 +40,7 @@ Copy Access Key ID + Secret Access Key once (secret not shown again).
 
 ### 4. Landing Worker deploy (CF Git Builds)
 
-**Worker:** `vidsync-web` · **path:** `apps/site` (not `apps/web` — that is legacy Astro)
+**Worker:** `vidsync-web` · **path:** `apps/site`
 
 Dashboard → Worker → Settings → Builds:
 
@@ -50,8 +50,6 @@ Dashboard → Worker → Settings → Builds:
 | **Build command** | leave empty, or `npm install` / `bun install` |
 | **Deploy command** | `npx wrangler deploy` |
 | **Version command** (preview) | `npx wrangler versions upload` |
-
-Wrong root (`apps/web`) deploys the old browser app and never ships the new landing.
 
 Manual:
 
@@ -108,18 +106,32 @@ new minisign signature → **signature verification failed** on auto-update.
 
 ### `updater.json` shape (Tauri static)
 
+Plugin ≥2.10 looks up `{os}-{arch}-{installer}` first, then `{os}-{arch}`.
+
 ```json
 {
   "version": "0.1.2",
   "notes": "VidSync 0.1.2",
   "pub_date": "2026-…",
   "platforms": {
+    "windows-x86_64-nsis": {
+      "url": "https://vidsync.ratt.ing/downloads/windows/VidSync-windows-setup-{ver}.exe",
+      "signature": "<contents of .sig>"
+    },
     "windows-x86_64": {
-      "url": "https://vidsync.ratt.ing/downloads/windows/VidSync-windows-setup.exe",
+      "url": "https://vidsync.ratt.ing/downloads/windows/VidSync-windows-setup-{ver}.exe",
+      "signature": "<contents of .sig>"
+    },
+    "linux-x86_64-appimage": {
+      "url": "https://vidsync.ratt.ing/downloads/linux/VidSync-linux-{ver}.AppImage",
       "signature": "<contents of .sig>"
     },
     "linux-x86_64": {
-      "url": "https://vidsync.ratt.ing/downloads/linux/VidSync-linux.AppImage",
+      "url": "https://vidsync.ratt.ing/downloads/linux/VidSync-linux-{ver}.AppImage",
+      "signature": "<contents of .sig>"
+    },
+    "linux-x86_64-deb": {
+      "url": "https://vidsync.ratt.ing/downloads/linux/VidSync-linux-{ver}.deb",
       "signature": "<contents of .sig>"
     }
   }
@@ -127,6 +139,11 @@ new minisign signature → **signature verification failed** on auto-update.
 ```
 
 Built by `apps/site/scripts/make-updater.mjs` in CI.
+
+**Linux .deb installs need `linux-x86_64-deb`.** Without it, a deb install downloads
+the AppImage URL, then `install_deb()` rejects non-deb bytes with
+`invalid updater binary format`. AppImage installs use `linux-x86_64-appimage` /
+legacy `linux-x86_64`.
 
 ## In-app flow
 

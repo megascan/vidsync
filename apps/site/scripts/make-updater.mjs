@@ -4,6 +4,17 @@
  * Usage: node make-updater.mjs <stageDir> <version> [baseUrl]
  *
  * Versioned paths only (avoids Workers Cache serving stale body vs new sig).
+ *
+ * Platform keys (tauri-plugin-updater ≥2.10):
+ *   Prefer `{os}-{arch}-{installer}` so each install format gets the right
+ *   binary. Fallback `{os}-{arch}` kept for older clients.
+ *
+ *   linux-x86_64-appimage / linux-x86_64 → AppImage
+ *   linux-x86_64-deb → .deb
+ *   windows-x86_64-nsis / windows-x86_64 → NSIS setup.exe
+ *
+ * Without the -deb key, a .deb install downloads AppImage → install_deb() →
+ * "invalid updater binary format".
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -31,19 +42,38 @@ function platform(rel) {
 }
 
 const platforms = {};
-const win = platform(
+
+const winNsis = platform(
   `downloads/windows/VidSync-windows-setup-${version}.exe`,
 );
-const lin = platform(`downloads/linux/VidSync-linux-${version}.AppImage`);
+const linApp = platform(`downloads/linux/VidSync-linux-${version}.AppImage`);
+const linDeb = platform(`downloads/linux/VidSync-linux-${version}.deb`);
 
-if (win) platforms["windows-x86_64"] = win;
-if (lin) platforms["linux-x86_64"] = lin;
+// Format-specific keys first (plugin prefers `{os}-{arch}-{installer}`)
+if (winNsis) {
+  platforms["windows-x86_64-nsis"] = winNsis;
+  platforms["windows-x86_64"] = winNsis;
+}
+if (linApp) {
+  platforms["linux-x86_64-appimage"] = linApp;
+  // Legacy / AppImage clients that only look up linux-x86_64
+  platforms["linux-x86_64"] = linApp;
+}
+if (linDeb) {
+  platforms["linux-x86_64-deb"] = linDeb;
+}
 
 if (Object.keys(platforms).length === 0) {
   console.error(
     "make-updater: no signed platforms found (need versioned installer + .sig)",
   );
   process.exit(1);
+}
+
+if (linDeb == null && linApp != null) {
+  console.warn(
+    "make-updater: no signed .deb — deb installs will fail auto-update with \"invalid updater binary format\"",
+  );
 }
 
 const updater = {
