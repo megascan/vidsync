@@ -27,8 +27,7 @@ export default function HomeApp() {
       if (!code || !isValidRoomCode(code)) {
         throw new Error("Server returned an invalid room code");
       }
-      // Pretty path; asset worker rewrites to room shell without dropping code
-      window.location.assign(`/r/${normalizeRoomCode(code)}`);
+      goToRoom(normalizeRoomCode(code));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create room");
       setTurnstileToken(null);
@@ -45,6 +44,11 @@ export default function HomeApp() {
       setError("Enter a valid 8-character room code.");
       return;
     }
+    goToRoom(code);
+  }
+
+  function goToRoom(code: string) {
+    // Prefer pretty /r/CODE (asset worker rewrite). Fallback query form always works.
     window.location.assign(`/r/${code}`);
   }
 
