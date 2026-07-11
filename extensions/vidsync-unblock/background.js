@@ -1,8 +1,9 @@
 /**
  * VidSync Unblock — service worker
  *
- * Room tab = UI + DO sync. Extension player tab = actual media stream
+ * Room tab = lobby (queue/chat/WS). Extension player = media + host controls
  * (chrome-extension page + host_permissions → Range streaming, no page CORS).
+ * Host play/pause/seek in player → room tab → DO.
  */
 
 const ALLOWED_PAGE_ORIGINS = new Set([
@@ -190,6 +191,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       positionMs: message.positionMs,
       isPlaying: message.isPlaying,
       durationMs: message.durationMs,
+      videoUrl: message.videoUrl,
+    });
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  // Host used native controls in player window → room applies to DO if host
+  if (message.type === "player_user_control") {
+    postToRoomTab({
+      event: "user_control",
+      controlType: message.controlType,
+      positionMs: message.positionMs,
+      isPlaying: message.isPlaying,
       videoUrl: message.videoUrl,
     });
     sendResponse({ ok: true });

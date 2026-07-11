@@ -68,14 +68,17 @@ function announce() {
 announce();
 [0, 100, 500, 1500].forEach((ms) => setTimeout(announce, ms));
 
-// Background → content → page (player ticks)
+// Background → content → page (ticks + host user controls)
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "room_from_player") {
+    const event =
+      message.event === "user_control" ? "player_user_control" : "player_tick";
     window.postMessage(
       {
         channel: CHANNEL,
         direction: "event",
-        type: "player_tick",
+        type: event,
+        controlType: message.controlType,
         positionMs: message.positionMs,
         isPlaying: message.isPlaying,
         durationMs: message.durationMs,

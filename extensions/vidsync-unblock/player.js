@@ -1,7 +1,7 @@
 /**
  * Extension-owned player window.
- * Plays media under chrome-extension:// with host_permissions — no page CORS.
- * Receives play/pause/seek from the room tab; reports position back for sync.
+ * Host uses native controls here; user play/pause/seek → room tab → DO.
+ * Room also pushes state (followers / queue URL change).
  */
 
 const video = document.getElementById("video");
@@ -11,8 +11,32 @@ const emptyEl = document.getElementById("empty");
 
 /** @type {string | null} */
 let currentUrl = null;
+/** Ignore local play/pause/seek events caused by room→player sync */
 let applyingRemote = false;
+/** Hold ignore window past async video.play() so events don't look user-driven */
+let applyingRemoteUntil = 0;
 let lastReportedMs = 0;
+/** Suppress user_control spam from rapid events */
+let lastControlAt = 0;
+/** @type {string | null} */
+let lastControlKey = null;
+
+function beginRemoteApply() {
+  applyingRemote = true;
+  applyingRemoteUntil = Date.now() + 450;
+}
+
+function endRemoteApply() {
+  queueMicrotask(() => {
+    window.setTimeout(() => {
+      if (Date.now() >= applyingRemoteUntil) applyingRemote = false;
+    }, 400);
+  });
+}
+
+function isRemoteApply() {
+  return applyingRemote || Date.now() < applyingRemoteUntil;
+}
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -39,7 +63,7 @@ function loadUrl(url) {
 
 function applyState(state) {
   if (!state || !currentUrl) return;
-  applyingRemote = true;
+  beginRemoteApply();
   try {
     const targetSec = Math.max(0, (state.positionMs ?? 0) / 1000);
     const nowSec = video.currentTime || 0;
@@ -64,15 +88,13 @@ function applyState(state) {
     }
     setStatus(state.isPlaying ? "Playing (synced)" : "Paused (synced)");
   } finally {
-    queueMicrotask(() => {
-      applyingRemote = false;
-    });
+    endRemoteApply();
   }
 }
 
 function applyControl(msg) {
   if (!msg || !currentUrl) return;
-  applyingRemote = true;
+  beginRemoteApply();
   try {
     const kind = msg.controlType ?? msg.type;
     if (typeof msg.positionMs === "number") {
@@ -90,19 +112,13 @@ function applyControl(msg) {
       else video.pause();
     }
   } finally {
-    queueMicrotask(() => {
-      applyingRemote = false;
-    });
+    endRemoteApply();
   }
 }
 
 function reportPosition() {
-  if (!currentUrl || applyingRemote) return;
+  if (!currentUrl || isRemoteApply()) return;
   const positionMs = Math.round((video.currentTime || 0) * 1000);
-  // Throttle
-  if (Math.abs(positionMs - lastReportedMs) < 200 && !video.paused) {
-    // still send every ~1s via interval
-  }
   lastReportedMs = positionMs;
   chrome.runtime.sendMessage({
     type: "player_tick",
@@ -115,9 +131,41 @@ function reportPosition() {
   });
 }
 
+/**
+ * User-driven control in this window → room tab (host only applies to DO).
+ * @param {"play" | "pause" | "seek"} controlType
+ */
+function reportUserControl(controlType) {
+  if (!currentUrl || isRemoteApply()) return;
+  const positionMs = Math.round((video.currentTime || 0) * 1000);
+  const isPlaying = !video.paused;
+  const key = `${controlType}:${positionMs}:${isPlaying ? 1 : 0}`;
+  const now = Date.now();
+  // Dedup identical control within 120ms (play+seeked etc.)
+  if (key === lastControlKey && now - lastControlAt < 120) return;
+  lastControlKey = key;
+  lastControlAt = now;
+
+  chrome.runtime.sendMessage({
+    type: "player_user_control",
+    controlType,
+    positionMs,
+    isPlaying,
+    videoUrl: currentUrl,
+  });
+  lastReportedMs = positionMs;
+  setStatus(
+    controlType === "play"
+      ? "Playing (host)"
+      : controlType === "pause"
+        ? "Paused (host)"
+        : `Seek ${Math.round(positionMs / 1000)}s (host)`,
+  );
+}
+
 video.addEventListener("loadedmetadata", () => {
   setStatus(
-    `Stream ready${Number.isFinite(video.duration) ? ` (${Math.round(video.duration / 60)} min)` : ""} — Range streaming`,
+    `Stream ready${Number.isFinite(video.duration) ? ` (${Math.round(video.duration / 60)} min)` : ""} — use controls here`,
   );
 });
 video.addEventListener("error", () => {
@@ -128,17 +176,25 @@ video.addEventListener("error", () => {
       : "Media error — check URL / network",
   );
 });
+
+// Host chrome controls → DO via room lobby
 video.addEventListener("play", () => {
-  if (!applyingRemote) reportPosition();
+  if (isRemoteApply()) return;
+  reportUserControl("play");
+  reportPosition();
 });
 video.addEventListener("pause", () => {
-  if (!applyingRemote) reportPosition();
+  if (isRemoteApply()) return;
+  reportUserControl("pause");
+  reportPosition();
 });
 video.addEventListener("seeked", () => {
-  if (!applyingRemote) reportPosition();
+  if (isRemoteApply()) return;
+  reportUserControl("seek");
+  reportPosition();
 });
 
-// Host using controls in this window → push ticks so room stays in sync
+// Position ticks for host heartbeat while playing
 setInterval(reportPosition, 1000);
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

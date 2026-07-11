@@ -25,6 +25,14 @@ export type PlayerTick = {
   videoUrl: string | null;
 };
 
+/** Host pressed native controls in the extension player window. */
+export type PlayerUserControl = {
+  controlType: "play" | "pause" | "seek";
+  positionMs: number;
+  isPlaying: boolean;
+  videoUrl: string | null;
+};
+
 type Pending = {
   resolve: (v: Record<string, unknown>) => void;
   reject: (e: Error) => void;
@@ -33,6 +41,7 @@ type Pending = {
 
 const pending = new Map<string, Pending>();
 const tickListeners = new Set<(t: PlayerTick) => void>();
+const userControlListeners = new Set<(c: PlayerUserControl) => void>();
 let listening = false;
 
 declare global {
@@ -58,6 +67,7 @@ function ensureListener(): void {
       type?: string;
       version?: string;
       ok?: boolean;
+      controlType?: string;
       positionMs?: number;
       isPlaying?: boolean;
       durationMs?: number | null;
@@ -84,6 +94,21 @@ function ensureListener(): void {
         videoUrl: typeof data.videoUrl === "string" ? data.videoUrl : null,
       };
       for (const cb of tickListeners) cb(tick);
+      return;
+    }
+
+    if (data.direction === "event" && data.type === "player_user_control") {
+      const raw = data.controlType;
+      const controlType =
+        raw === "play" || raw === "pause" || raw === "seek" ? raw : null;
+      if (!controlType) return;
+      const ctrl: PlayerUserControl = {
+        controlType,
+        positionMs: Number(data.positionMs) || 0,
+        isPlaying: Boolean(data.isPlaying),
+        videoUrl: typeof data.videoUrl === "string" ? data.videoUrl : null,
+      };
+      for (const cb of userControlListeners) cb(ctrl);
       return;
     }
 
@@ -231,6 +256,17 @@ export function onUnblockPlayerTick(cb: (t: PlayerTick) => void): () => void {
   tickListeners.add(cb);
   return () => {
     tickListeners.delete(cb);
+  };
+}
+
+/** Host used play/pause/seek in the extension player — room tab maps to DO. */
+export function onUnblockPlayerUserControl(
+  cb: (c: PlayerUserControl) => void,
+): () => void {
+  ensureListener();
+  userControlListeners.add(cb);
+  return () => {
+    userControlListeners.delete(cb);
   };
 }
 

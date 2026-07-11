@@ -29,3 +29,4 @@ Pretty `/r/:code` via `apps/web/src/asset-worker.ts` (see DOCS/architecture.md).
 
 ## Extension
 `extensions/vidsync-unblock` — MV3, load unpacked. Bridge: `apps/web/src/lib/unblock/`.
+Room tab = lobby (queue/chat/WS). Host play/pause/seek live in extension player → DO.

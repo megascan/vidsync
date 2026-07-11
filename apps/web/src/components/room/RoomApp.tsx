@@ -22,6 +22,7 @@ import { applyDrift, SyncClient } from "../../lib/sync/client";
 import { useRoomStore } from "../../lib/store/roomStore";
 import {
   onUnblockPlayerTick,
+  onUnblockPlayerUserControl,
   onUnblockReady,
   openUnblockPlayer,
   pingUnblock,
@@ -234,15 +235,27 @@ export default function RoomApp() {
     };
   }, [playback?.videoUrl, extPlayerMode, setMediaError]);
 
-  // Push room playback state into extension player (followers + host resync)
+  // Followers: always apply DO state into extension player.
+  // Host owns the player — do NOT push every heartbeat (fights native controls).
   useEffect(() => {
-    if (!extPlayerMode || !playback?.videoUrl) return;
+    if (!extPlayerMode || !playback?.videoUrl || isHost) return;
     void pushUnblockPlayerState({
       videoUrl: playback.videoUrl,
       isPlaying: playback.isPlaying,
       positionMs: expectedPositionForPush(playback, clockOffsetMs),
     });
-  }, [extPlayerMode, playback, clockOffsetMs]);
+  }, [extPlayerMode, playback, clockOffsetMs, isHost]);
+
+  // Host: only force player load when queue URL changes (not every heartbeat)
+  const hostExtVideoUrl = isHost && extPlayerMode ? playback?.videoUrl : null;
+  useEffect(() => {
+    if (!hostExtVideoUrl || !playback) return;
+    void pushUnblockPlayerState({
+      videoUrl: hostExtVideoUrl,
+      isPlaying: playback.isPlaying,
+      positionMs: expectedPositionForPush(playback, clockOffsetMs),
+    });
+  }, [hostExtVideoUrl]);
 
   // Ticks from extension player → host heartbeat / local ref
   useEffect(() => {
@@ -252,6 +265,33 @@ export default function RoomApp() {
         positionMs: tick.positionMs,
         isPlaying: tick.isPlaying,
       };
+    });
+  }, [extPlayerMode]);
+
+  // Host used chrome controls in extension player → DO authority
+  useEffect(() => {
+    if (!extPlayerMode) return;
+    return onUnblockPlayerUserControl((ctrl) => {
+      const host = useRoomStore.getState().isHost;
+      const client = clientRef.current;
+      if (!host || !client) return;
+
+      extPositionRef.current = {
+        positionMs: ctrl.positionMs,
+        isPlaying: ctrl.isPlaying,
+      };
+
+      if (ctrl.controlType === "play") {
+        client.send({ type: "play", positionMs: ctrl.positionMs });
+      } else if (ctrl.controlType === "pause") {
+        client.send({ type: "pause", positionMs: ctrl.positionMs });
+      } else {
+        client.send({
+          type: "seek",
+          positionMs: ctrl.positionMs,
+          isPlaying: ctrl.isPlaying,
+        });
+      }
     });
   }, [extPlayerMode]);
 
@@ -447,8 +487,7 @@ export default function RoomApp() {
   };
 
   /**
-   * Open extension player popup — streams with Range under extension origin
-   * (no page CORS). Room tab keeps DO sync and relays controls.
+   * Open extension player — host controls live there; this tab stays lobby.
    */
   const onOpenWithUnblock = () => {
     void (async () => {
@@ -492,7 +531,9 @@ export default function RoomApp() {
 
       setExtPlayerMode(true);
       setUnblockStatus(
-        "Playing in Unblock window (streams with Range). Keep this room tab open for sync.",
+        isHost
+          ? "Lobby mode. Play / pause / seek in the Unblock player window — that drives the room."
+          : "Lobby mode. Video plays in the Unblock window; keep this tab open for sync.",
       );
       // Stop in-page media so only the popup streams
       sourceRef.current?.destroy();
@@ -648,13 +689,21 @@ export default function RoomApp() {
             {extPlayerMode ? (
               <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-[var(--color-surface)] px-6 text-center">
                 <p className="text-sm font-medium text-[var(--color-accent)]">
-                  Streaming in Unblock window
+                  Lobby · video in Unblock player
                 </p>
                 <p className="max-w-sm text-xs leading-relaxed text-[var(--color-muted)]">
-                  Video plays in the extension popup (Range stream, no page
-                  CORS). This tab only keeps the room + sync. Host controls
-                  still work here.
+                  {isHost
+                    ? "Use play / pause / seek in the player window — that drives everyone. This tab is queue, chat, and room sync."
+                    : "Watch in the Unblock window. Keep this tab open so sync stays connected."}
                 </p>
+                <button
+                  type="button"
+                  onClick={onOpenWithUnblock}
+                  disabled={openingUnblock}
+                  className="mt-1 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-black disabled:opacity-40"
+                >
+                  {openingUnblock ? "Opening…" : "Focus / reopen player"}
+                </button>
               </div>
             ) : !hasVideo ? (
               <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-[var(--color-surface)] px-6 text-center">
@@ -669,12 +718,14 @@ export default function RoomApp() {
               </div>
             ) : null}
             <div className="flex flex-col gap-3 border-t border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-              {!isHost ? (
+              {/* In-page host controls only when NOT in extension player (lobby) mode */}
+              {!extPlayerMode && !isHost ? (
                 <p className="text-xs text-[var(--color-muted)]">
                   Host controls playback and queue. Stay on this tab for best
                   sync.
                 </p>
-              ) : (
+              ) : null}
+              {!extPlayerMode && isHost ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
@@ -709,43 +760,51 @@ export default function RoomApp() {
                     {durationOk ? ` / ${formatTime(duration * 1000)}` : ""}
                   </span>
                 </div>
-              )}
+              ) : null}
 
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onOpenWithUnblock}
-                  disabled={!hasVideo || openingUnblock}
-                  className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-black disabled:opacity-40"
-                  title={
-                    unblockOn
-                      ? "Reload this stream through the Unblock extension (no page CORS)"
-                      : "Install VidSync Unblock, then reload this tab"
-                  }
-                >
-                  {openingUnblock
-                    ? "Opening player…"
-                    : extPlayerMode
-                      ? "Reopen Unblock player"
+              {extPlayerMode && isHost ? (
+                <p className="font-mono text-xs text-[var(--color-muted)]">
+                  {playback
+                    ? `${playback.isPlaying ? "▶" : "❚❚"} ${formatTime(playback.positionMs)} · room state`
+                    : "0:00"}
+                </p>
+              ) : null}
+
+              {!extPlayerMode ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onOpenWithUnblock}
+                    disabled={!hasVideo || openingUnblock}
+                    className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-black disabled:opacity-40"
+                    title={
+                      unblockOn
+                        ? "Open extension player (host controls live there)"
+                        : "Install VidSync Unblock, then reload this tab"
+                    }
+                  >
+                    {openingUnblock
+                      ? "Opening player…"
                       : unblockOn
                         ? "Stream with Unblock"
                         : "Stream with Unblock (install ext)"}
-                </button>
-                <button
-                  type="button"
-                  onClick={onOpenVideoTab}
-                  disabled={!hasVideo}
-                  className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-40"
-                  title="Open the raw media URL in a new browser tab"
-                >
-                  Open URL
-                </button>
-                {!unblockOn ? (
-                  <span className="text-[11px] text-[var(--color-muted)]">
-                    Extension not detected — load unpacked + refresh tab
-                  </span>
-                ) : null}
-              </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onOpenVideoTab}
+                    disabled={!hasVideo}
+                    className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-40"
+                    title="Open the raw media URL in a new browser tab"
+                  >
+                    Open URL
+                  </button>
+                  {!unblockOn ? (
+                    <span className="text-[11px] text-[var(--color-muted)]">
+                      Extension not detected — load unpacked + refresh tab
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
 
               {unblockStatus ? (
                 <p className="text-xs text-[var(--color-accent)]" role="status">
@@ -755,7 +814,7 @@ export default function RoomApp() {
               {hasVideo ? (
                 <p className="truncate font-mono text-xs text-[var(--color-muted)]">
                   Now: {playback?.videoUrl}
-                  {extPlayerMode ? " · Unblock player window" : ""}
+                  {extPlayerMode ? " · Unblock player" : ""}
                 </p>
               ) : null}
             </div>

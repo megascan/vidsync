@@ -1,9 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  getUnblockVersion,
-  onUnblockReady,
-  pingUnblock,
-} from "../../lib/unblock/bridge";
+import { onUnblockReady, pingUnblock } from "../../lib/unblock/bridge";
 
 export default function UnblockStatus() {
   const [on, setOn] = useState(false);

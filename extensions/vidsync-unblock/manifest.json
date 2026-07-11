@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "VidSync Unblock",
-  "version": "2.0.0",
-  "description": "VidSync: opens an extension player window that streams multi‑GB video (Range) without page CORS, and syncs with the room tab.",
+  "version": "2.1.0",
+  "description": "VidSync: extension player streams multi‑GB video (Range, no page CORS). Host controls live in the player; room tab is the lobby.",
   "permissions": ["storage", "tabs"],
   "host_permissions": ["*://*/*"],
   "background": {
