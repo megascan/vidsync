@@ -1,6 +1,8 @@
 # vidsync-host
 
-Rust CLI: serve a local video over HTTP (Range / seek-friendly), optional **UPnP** temp port-forward, and helper to stage the **VidSync Unblock** extension.
+Serve a local video over HTTP (Range / seek-friendly), optional **UPnP** temp port-forward, and helper to stage the **VidSync Unblock** extension.
+
+**GUI by default** (pick file → Start stream → copy URL). CLI still works for scripts.
 
 ## Build
 
@@ -10,7 +12,21 @@ cargo build --release
 # binary: target/release/vidsync-host.exe
 ```
 
-## Serve a file
+## GUI
+
+```bash
+cargo run --release
+# or
+cargo run --release -- gui
+```
+
+- **Browse…** — native file picker  
+- **Port** / **UPnP** toggle  
+- **Start stream** / **Stop**  
+- **Install Unblock** — stage extension + session load  
+- Share URLs with **Copy**
+
+## Serve a file (CLI)
 
 ```bash
 # LAN + UPnP (default). URL copied to clipboard.

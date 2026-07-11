@@ -14,8 +14,13 @@ VidSync only syncs **URLs** — it does not upload media. Hosts with a file on d
 
 | Command | Role |
 |---|---|
-| `vidsync-host serve <file>` | Bind HTTP, print LAN (+ WAN if UPnP), Ctrl+C cleans map |
+| `vidsync-host` / `gui` | egui window: file picker, start/stop, copy URLs, install Unblock |
+| `vidsync-host serve <file>` | Headless: bind HTTP, print LAN (+ WAN if UPnP), Ctrl+C cleans map |
 | `vidsync-host install-ext` | Stage `vidsync-unblock` + optional `--load-extension` launch |
+
+## GUI stack
+
+`eframe`/`egui` + `rfd` native dialog. Server runs on a dedicated Tokio worker thread (`session::ServeSession`).
 
 ## URL shape
 

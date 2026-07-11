@@ -1,32 +1,37 @@
 //! VidSync Host — stream a local file over HTTP with optional UPnP port map.
-//! Also helps install the VidSync Unblock Chromium extension.
+//! GUI by default; CLI subcommands for scripting.
 
 mod ext;
+mod gui;
 mod net;
 mod server;
+mod session;
 mod upnp;
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
+
+use session::{ServeOptions, ServeSession};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "vidsync-host",
     version,
-    about = "Stream a local video for VidSync (HTTP + UPnP) and install Unblock extension"
+    about = "Stream a local video for VidSync (HTTP + UPnP). Opens GUI when run with no args."
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Commands,
+    cmd: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Open the file-picker GUI (default when no command is given)
+    Gui,
+
     /// Serve a file over HTTP (Range-capable). Optional UPnP temp port-forward.
     Serve {
         /// Path to the video (or any) file to stream
@@ -77,8 +82,7 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -88,7 +92,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Commands::Serve {
+        None | Some(Commands::Gui) => {
+            gui::run().map_err(|e| anyhow::anyhow!("GUI error: {e}"))?;
+            Ok(())
+        }
+        Some(Commands::Serve {
             file,
             port,
             bind,
@@ -97,144 +105,55 @@ async fn main() -> Result<()> {
             lease_secs,
             install_ext,
             no_clipboard,
-        } => {
-            if install_ext {
-                match ext::install(None, true, false) {
-                    Ok(msg) => info!("{msg}"),
-                    Err(e) => warn!("extension install helper failed: {e:#}"),
+        }) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                if install_ext {
+                    match ext::install(None, true, false) {
+                        Ok(msg) => info!("{msg}"),
+                        Err(e) => warn!("extension install helper failed: {e:#}"),
+                    }
                 }
-            }
-            run_serve(
-                file,
-                port,
-                bind,
-                no_upnp,
-                external_port,
-                lease_secs,
-                !no_clipboard,
-            )
-            .await
+                let session = ServeSession::start(ServeOptions {
+                    file,
+                    port,
+                    bind,
+                    upnp: !no_upnp,
+                    external_port,
+                    lease_secs,
+                    clipboard: !no_clipboard,
+                })
+                .await?;
+
+                println!();
+                println!("  LAN URL (same network):");
+                println!("    {}", session.info.lan_url);
+                println!();
+                if let Some(wan) = &session.info.wan_url {
+                    println!("  WAN URL (UPnP):");
+                    println!("    {wan}");
+                    println!();
+                } else if !no_upnp {
+                    println!("  UPnP: unavailable — share LAN URL only.");
+                    println!();
+                }
+                println!("  Paste into VidSync queue → Stream with Unblock.");
+                println!("  Press Ctrl+C to stop.");
+                println!();
+
+                let _ = tokio::signal::ctrl_c().await;
+                session.stop().await;
+                Ok(())
+            })
         }
-        Commands::InstallExt {
+        Some(Commands::InstallExt {
             from,
             no_launch,
             edge,
-        } => {
+        }) => {
             let msg = ext::install(from, !no_launch, edge)?;
             println!("{msg}");
             Ok(())
         }
-    }
-}
-
-async fn run_serve(
-    file: PathBuf,
-    port: u16,
-    bind: String,
-    no_upnp: bool,
-    external_port: u16,
-    lease_secs: u32,
-    clipboard: bool,
-) -> Result<()> {
-    let file = file
-        .canonicalize()
-        .with_context(|| format!("file not found: {}", file.display()))?;
-    if !file.is_file() {
-        bail!("not a file: {}", file.display());
-    }
-
-    let token = server::random_token();
-    let state = Arc::new(server::AppState {
-        path: file.clone(),
-        token: token.clone(),
-        mime: server::guess_mime(&file),
-        file_name: file
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "video".into()),
-    });
-
-    let listener = tokio::net::TcpListener::bind(format!("{bind}:{port}"))
-        .await
-        .with_context(|| format!("bind {bind}:{port}"))?;
-    let local_port = listener.local_addr()?.port();
-    let lan_ip = net::lan_ipv4().unwrap_or_else(|| std::net::Ipv4Addr::LOCALHOST);
-
-    info!("serving {}", file.display());
-    info!("token path /s/{token}");
-
-    let lan_url = format!("http://{lan_ip}:{local_port}/s/{token}");
-    println!();
-    println!("  LAN URL (same network):");
-    println!("    {lan_url}");
-    println!();
-
-    // UPnP mapping — cleaned on Ctrl+C / process exit
-    let mut mapping: Option<upnp::Mapping> = None;
-    if !no_upnp {
-        match upnp::map_tcp(lan_ip, local_port, external_port, lease_secs).await {
-            Ok(m) => {
-                let wan_url = format!("http://{}:{}/s/{token}", m.external_ip, m.external_port);
-                println!("  WAN URL (UPnP mapped — friends offline LAN):");
-                println!("    {wan_url}");
-                println!();
-                println!(
-                    "  Gateway {} → {}:{} (lease {}s, removed on exit)",
-                    m.gateway_addr,
-                    m.external_port,
-                    local_port,
-                    if lease_secs == 0 {
-                        "until exit".to_string()
-                    } else {
-                        lease_secs.to_string()
-                    }
-                );
-                println!();
-                if clipboard {
-                    try_clipboard(&wan_url);
-                }
-                mapping = Some(m);
-            }
-            Err(e) => {
-                warn!("UPnP failed (LAN still works): {e:#}");
-                println!("  UPnP: unavailable — share the LAN URL only, or open port manually.");
-                println!();
-                if clipboard {
-                    try_clipboard(&lan_url);
-                }
-            }
-        }
-    } else if clipboard {
-        try_clipboard(&lan_url);
-    }
-
-    println!("  Paste URL into VidSync host queue, then Stream with Unblock.");
-    println!("  Press Ctrl+C to stop and remove UPnP mapping.");
-    println!();
-
-    let app = server::router(state);
-
-    let serve = axum::serve(listener, app).with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-        info!("shutting down…");
-    });
-
-    let result = serve.await;
-    if let Some(m) = mapping {
-        // small grace so in-flight requests finish
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        if let Err(e) = m.remove().await {
-            warn!("UPnP remove failed: {e:#}");
-        } else {
-            info!("UPnP mapping removed");
-        }
-    }
-    result.context("server error")
-}
-
-fn try_clipboard(url: &str) {
-    match arboard::Clipboard::new().and_then(|mut c| c.set_text(url.to_string())) {
-        Ok(()) => println!("  (URL copied to clipboard)"),
-        Err(e) => warn!("clipboard: {e}"),
     }
 }
