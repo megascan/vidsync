@@ -1,6 +1,7 @@
 # Tech debt
 
 - **GH secrets for release CI:** `TAURI_SIGNING_PRIVATE_KEY` + R2 S3 trio only. Site Worker redeploy is manual (`wrangler deploy`) when site code changes — not CI.
+- **R2 binary keys overwrite same path** — downloads cached 1d. Prefer versioned filenames + `immutable` later; optional purge-by-tag after CI publish.
 - Local overrides: web `apps/web/.env`, api `workers/api/.dev.vars` (WEB_ORIGIN). Prod defaults: `vidsync.ratt.ing` / `api.vidsync.ratt.ing`.
 - Desktop create skips Turnstile (`X-VidSync-Client: desktop/…`) — **need CF rate-limit / IP bucket** before abuse (same as member-cap gap).
 - No IP rate limiting yet beyond member cap — add CF rate-limit rules or Worker bucket before public launch.

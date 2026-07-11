@@ -36,3 +36,7 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 - Secrets: `TAURI_SIGNING_PRIVATE_KEY` (+ optional password)
 - Pubkey: `apps/desktop/src-tauri/tauri.conf.json` → `plugins.updater.pubkey`
 - Private key: local `.keys/` only (gitignored)
+
+## Site cache
+- `apps/site` Worker: `"cache": { "enabled": true }` (Workers Cache, tiered)
+- R2 JSON 60s · downloads 1d (same-key overwrite) · docs `DOCS/site-cache.md`
