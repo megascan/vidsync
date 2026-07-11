@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  CHAT_COOLDOWN_MS,
   MAX_MEMBERS,
   MAX_QUEUE_LENGTH,
   ROOM_IDLE_TTL_MS,
@@ -18,6 +19,7 @@ type SessionAttachment = {
   nickname: string;
   joinedAtMs: number;
   helloDone: boolean;
+  lastChatMs?: number;
 };
 
 type StoredRoom = {
@@ -332,6 +334,37 @@ export class Room extends DurableObject<Env> {
       ws.serializeAttachment(session);
       this.sessions.set(ws, session);
       this.broadcastMembers();
+      await this.touch();
+      return;
+    }
+
+    // Stateless chat: broadcast only, not persisted (dies with connections / hibernate)
+    if (msg.type === "chat") {
+      const now = Date.now();
+      const last = session.lastChatMs ?? 0;
+      if (now - last < CHAT_COOLDOWN_MS) {
+        this.send(ws, {
+          type: "error",
+          code: "chat_slow_down",
+          message: "Slow down a bit",
+        });
+        return;
+      }
+      session.lastChatMs = now;
+      ws.serializeAttachment(session);
+      this.sessions.set(ws, session);
+
+      const chatMsg: ServerMessage = {
+        type: "chat",
+        message: {
+          id: crypto.randomUUID(),
+          sessionId: session.sessionId,
+          nickname: session.nickname,
+          text: msg.text,
+          serverTimeMs: now,
+        },
+      };
+      this.broadcast(chatMsg);
       await this.touch();
       return;
     }

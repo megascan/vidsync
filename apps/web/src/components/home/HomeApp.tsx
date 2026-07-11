@@ -1,28 +1,50 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createRoom } from "../../lib/api";
+import {
+  loadStoredNickname,
+  normalizeNickname,
+  saveNickname,
+} from "../../lib/nickname";
 import { isValidRoomCode, normalizeRoomCode } from "../../lib/roomCode";
 import Turnstile from "../Turnstile";
 
 export default function HomeApp() {
+  const [nickname, setNickname] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [captchaReset, setCaptchaReset] = useState(0);
 
+  useEffect(() => {
+    const stored = loadStoredNickname();
+    if (stored) setNickname(stored);
+  }, []);
+
   const onToken = useCallback((token: string | null) => {
     setTurnstileToken(token);
   }, []);
 
+  function commitNick(): string | null {
+    const n = normalizeNickname(nickname);
+    if (!n) {
+      setError("Pick a nickname first.");
+      return null;
+    }
+    saveNickname(n);
+    setNickname(n);
+    return n;
+  }
+
   async function onCreate() {
     setError(null);
+    if (!commitNick()) return;
     if (!turnstileToken) {
       setError("Complete the captcha first.");
       return;
     }
     setBusy(true);
     try {
-      // Empty room = sync group; host queues streams inside the room
       const { code } = await createRoom({ turnstileToken });
       if (!code || !isValidRoomCode(code)) {
         throw new Error("Server returned an invalid room code");
@@ -39,6 +61,7 @@ export default function HomeApp() {
 
   function onJoin() {
     setError(null);
+    if (!commitNick()) return;
     const code = normalizeRoomCode(joinCode);
     if (!isValidRoomCode(code)) {
       setError("Enter a valid 8-character room code.");
@@ -48,24 +71,51 @@ export default function HomeApp() {
   }
 
   function goToRoom(code: string) {
-    // Prefer pretty /r/CODE (asset worker rewrite). Fallback query form always works.
     window.location.assign(`/r/${code}`);
   }
+
+  const nickOk = normalizeNickname(nickname).length > 0;
 
   return (
     <div className="flex flex-col gap-6">
       <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+        <h2 className="text-sm font-medium">Your nickname</h2>
+        <p className="mt-1 text-xs text-[var(--color-muted)]">
+          Shown in the room and chat. Saved in this browser.
+        </p>
+        <label className="mt-3 block text-xs text-[var(--color-muted)]">
+          Nickname
+          <input
+            type="text"
+            value={nickname}
+            onChange={(e) => setNickname(e.target.value)}
+            onBlur={() => {
+              const n = normalizeNickname(nickname);
+              if (n) {
+                saveNickname(n);
+                setNickname(n);
+              }
+            }}
+            placeholder="e.g. strange"
+            maxLength={24}
+            autoComplete="nickname"
+            className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+          />
+        </label>
+      </section>
+
+      <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h2 className="text-sm font-medium">Create room</h2>
         <p className="mt-1 text-xs leading-relaxed text-[var(--color-muted)]">
-          Opens an empty sync group. After join, the host queues public HTTPS
-          stream URLs (MP4, WebM, HLS). No video required up front.
+          Opens an empty sync group. Host queues public HTTPS streams after
+          join.
         </p>
 
         <Turnstile onToken={onToken} resetKey={captchaReset} />
 
         <button
           type="button"
-          disabled={busy || !turnstileToken}
+          disabled={busy || !turnstileToken || !nickOk}
           onClick={() => void onCreate()}
           className="mt-3 w-full rounded-md bg-[var(--color-accent)] px-3 py-2 text-sm font-semibold text-black disabled:opacity-50"
         >
@@ -88,8 +138,9 @@ export default function HomeApp() {
         </label>
         <button
           type="button"
+          disabled={!nickOk}
           onClick={onJoin}
-          className="mt-3 w-full rounded-md border border-[var(--color-border)] px-3 py-2 text-sm font-medium text-[var(--color-text)] hover:border-[var(--color-muted)]"
+          className="mt-3 w-full rounded-md border border-[var(--color-border)] px-3 py-2 text-sm font-medium text-[var(--color-text)] hover:border-[var(--color-muted)] disabled:opacity-50"
         >
           Join
         </button>

@@ -3,7 +3,12 @@
  * /r/XXXXXXXX → room shell HTML; browser URL stays /r/… so the island can parse the code.
  */
 export interface Env {
-  ASSETS: Fetcher;
+  ASSETS: {
+    fetch: (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => Promise<Response>;
+  };
 }
 
 const ROOM_PATH = /^\/r\/([A-Za-z0-9]{6,12})\/?$/i;

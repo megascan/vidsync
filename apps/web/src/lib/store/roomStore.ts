@@ -1,6 +1,8 @@
 import { create } from "zustand";
-import type { Member, PlaybackState } from "@vidsync/shared";
+import type { ChatMessage, Member, PlaybackState } from "@vidsync/shared";
 import type { ConnState } from "../sync/client";
+
+const MAX_LOCAL_CHAT = 150;
 
 type RoomStore = {
   code: string | null;
@@ -8,6 +10,7 @@ type RoomStore = {
   isHost: boolean;
   playback: PlaybackState | null;
   members: Member[];
+  chat: ChatMessage[];
   conn: ConnState;
   clockOffsetMs: number;
   lastError: string | null;
@@ -24,6 +27,8 @@ type RoomStore = {
   }) => void;
   setPlayback: (state: PlaybackState) => void;
   setMembers: (members: Member[]) => void;
+  pushChat: (message: ChatMessage) => void;
+  clearChat: () => void;
   setClockOffset: (serverTimeMs: number, localTimeMs: number) => void;
   setLastError: (msg: string | null) => void;
   setMediaError: (msg: string | null) => void;
@@ -36,6 +41,7 @@ export const useRoomStore = create<RoomStore>((set) => ({
   isHost: false,
   playback: null,
   members: [],
+  chat: [],
   conn: "idle",
   clockOffsetMs: 0,
   lastError: null,
@@ -55,11 +61,9 @@ export const useRoomStore = create<RoomStore>((set) => ({
     set((s) => ({
       playback,
       isHost:
-        s.sessionId != null && playback.hostSessionId === s.sessionId
-          ? true
-          : s.sessionId != null
-            ? playback.hostSessionId === s.sessionId
-            : s.isHost,
+        s.sessionId != null
+          ? playback.hostSessionId === s.sessionId
+          : s.isHost,
     })),
   setMembers: (members) =>
     set((s) => ({
@@ -69,6 +73,11 @@ export const useRoomStore = create<RoomStore>((set) => ({
           ? members.some((m) => m.sessionId === s.sessionId && m.isHost)
           : s.isHost,
     })),
+  pushChat: (message) =>
+    set((s) => ({
+      chat: [...s.chat, message].slice(-MAX_LOCAL_CHAT),
+    })),
+  clearChat: () => set({ chat: [] }),
   setClockOffset: (serverTimeMs, localTimeMs) =>
     set({ clockOffsetMs: serverTimeMs - localTimeMs }),
   setLastError: (lastError) => set({ lastError }),

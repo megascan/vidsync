@@ -5,8 +5,11 @@ export const MAX_MEMBERS = 20;
 export const MAX_NICKNAME_LENGTH = 24;
 export const MAX_VIDEO_URL_LENGTH = 2048;
 export const MAX_QUEUE_LENGTH = 50;
+export const MAX_CHAT_LENGTH = 280;
 export const HOST_HEARTBEAT_MS = 5000;
 export const ROOM_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
+/** Min ms between chat messages per session (stateless flood control). */
+export const CHAT_COOLDOWN_MS = 400;
 
 /** Crockford base32 alphabet (no I, L, O, U). */
 export const ROOM_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -123,9 +126,28 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("set_nickname"),
     nickname: nicknameSchema,
   }),
+  z.object({
+    type: z.literal("chat"),
+    text: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_CHAT_LENGTH)
+      .transform((s) => s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")),
+  }),
 ]);
 
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
+
+export const chatMessageSchema = z.object({
+  id: z.string(),
+  sessionId: z.string(),
+  nickname: z.string(),
+  text: z.string(),
+  serverTimeMs: z.number().int().nonnegative(),
+});
+
+export type ChatMessage = z.infer<typeof chatMessageSchema>;
 
 export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({
@@ -145,6 +167,10 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("members"),
     members: z.array(memberSchema),
     serverTimeMs: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("chat"),
+    message: chatMessageSchema,
   }),
   z.object({
     type: z.literal("error"),

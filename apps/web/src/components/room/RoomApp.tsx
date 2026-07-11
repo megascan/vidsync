@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   HOST_HEARTBEAT_MS,
+  MAX_CHAT_LENGTH,
   isAllowedVideoUrl,
   type PlaybackState,
 } from "@vidsync/shared";
 import { wsUrlForRoom } from "../../lib/api";
-import { loadNickname, saveNickname } from "../../lib/nickname";
+import {
+  loadNickname,
+  loadStoredNickname,
+  normalizeNickname,
+  saveNickname,
+} from "../../lib/nickname";
 import {
   attachVideoSource,
   type SourceHandle,
@@ -24,10 +30,22 @@ function formatTime(ms: number): string {
 function shortUrl(url: string): string {
   try {
     const u = new URL(url);
-    const path = u.pathname.length > 28 ? `${u.pathname.slice(0, 28)}…` : u.pathname;
+    const path =
+      u.pathname.length > 28 ? `${u.pathname.slice(0, 28)}…` : u.pathname;
     return `${u.hostname}${path}`;
   } catch {
     return url.slice(0, 48);
+  }
+}
+
+function formatChatTime(ms: number): string {
+  try {
+    return new Date(ms).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
   }
 }
 
@@ -37,6 +55,7 @@ export default function RoomApp() {
   const sourceRef = useRef<SourceHandle | null>(null);
   const applyingRemote = useRef(false);
   const lastVersion = useRef(-1);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const {
     code,
@@ -44,6 +63,7 @@ export default function RoomApp() {
     isHost,
     playback,
     members,
+    chat,
     conn,
     clockOffsetMs,
     lastError,
@@ -54,6 +74,8 @@ export default function RoomApp() {
     setWelcome,
     setPlayback,
     setMembers,
+    pushChat,
+    clearChat,
     setClockOffset,
     setLastError,
     setMediaError,
@@ -62,6 +84,9 @@ export default function RoomApp() {
   const [urlDraft, setUrlDraft] = useState("");
   const [copied, setCopied] = useState(false);
   const [nickDraft, setNickDraft] = useState("");
+  const [chatDraft, setChatDraft] = useState("");
+  /** Wait for nick pick before opening WS when no local nick yet */
+  const [nickReady, setNickReady] = useState(false);
 
   useEffect(() => {
     const resolved = parseRoomCodeFromLocation(
@@ -76,14 +101,36 @@ export default function RoomApp() {
     if (!window.location.pathname.startsWith("/r/")) {
       window.history.replaceState(null, "", `/r/${resolved}`);
     }
-    const nick = loadNickname();
-    setNickname(nick);
-    setNickDraft(nick);
+
+    const stored = loadStoredNickname();
+    if (stored) {
+      setNickname(stored);
+      setNickDraft(stored);
+      setNickReady(true);
+    } else {
+      setNickDraft("");
+      setNickReady(false);
+    }
   }, [setCode, setLastError, setNickname]);
 
+  const enterWithNick = () => {
+    const n = normalizeNickname(nickDraft);
+    if (!n) {
+      setLastError("Enter a nickname to join");
+      return;
+    }
+    saveNickname(n);
+    setNickname(n);
+    setNickDraft(n);
+    setLastError(null);
+    setNickReady(true);
+  };
+
+  // Connect only after nick is ready
   useEffect(() => {
-    if (!code) return;
+    if (!code || !nickReady) return;
     const nick = loadNickname();
+    clearChat();
     const client = new SyncClient(wsUrlForRoom(code), nick, {
       onConn: setConn,
       onWelcome: (p) => {
@@ -94,6 +141,7 @@ export default function RoomApp() {
         setPlayback(state);
       },
       onMembers: setMembers,
+      onChat: pushChat,
       onError: (c, message) => setLastError(`${c}: ${message}`),
       onClock: setClockOffset,
     });
@@ -105,6 +153,9 @@ export default function RoomApp() {
     };
   }, [
     code,
+    nickReady,
+    clearChat,
+    pushChat,
     setClockOffset,
     setConn,
     setLastError,
@@ -112,6 +163,10 @@ export default function RoomApp() {
     setPlayback,
     setWelcome,
   ]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chat.length]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -253,11 +308,19 @@ export default function RoomApp() {
   };
 
   const onSaveNick = () => {
-    const n = nickDraft.trim().slice(0, 24);
+    const n = normalizeNickname(nickDraft);
     if (!n) return;
     saveNickname(n);
     setNickname(n);
+    setNickDraft(n);
     clientRef.current?.setNickname(n);
+  };
+
+  const onSendChat = () => {
+    const text = chatDraft.trim();
+    if (!text || !clientRef.current) return;
+    clientRef.current.sendChat(text.slice(0, MAX_CHAT_LENGTH));
+    setChatDraft("");
   };
 
   const onCopy = async () => {
@@ -296,6 +359,54 @@ export default function RoomApp() {
       clientRef.current?.send({ type: "pause", positionMs });
     });
   };
+
+  // Nick gate before join
+  if (!nickReady) {
+    return (
+      <div className="mx-auto flex min-h-full max-w-sm flex-col justify-center gap-4 px-4 py-12">
+        <div>
+          <a
+            href="/"
+            className="font-mono text-xs tracking-widest text-[var(--color-accent)] uppercase"
+          >
+            VidSync
+          </a>
+          <h1 className="mt-2 text-xl font-semibold">Pick a nickname</h1>
+          <p className="mt-1 text-sm text-[var(--color-muted)]">
+            Shown in the room and chat. Saved in this browser.
+          </p>
+        </div>
+        <label className="block text-xs text-[var(--color-muted)]">
+          Nickname
+          <input
+            type="text"
+            value={nickDraft}
+            onChange={(e) => setNickDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") enterWithNick();
+            }}
+            maxLength={24}
+            autoFocus
+            autoComplete="nickname"
+            placeholder="e.g. strange"
+            className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={enterWithNick}
+          className="rounded-md bg-[var(--color-accent)] px-3 py-2 text-sm font-semibold text-black"
+        >
+          Enter room {code ? `(${code})` : ""}
+        </button>
+        {lastError ? (
+          <p className="text-sm text-[var(--color-danger)]" role="alert">
+            {lastError}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
 
   const duration = videoRef.current?.duration;
   const durationOk = duration != null && Number.isFinite(duration);
@@ -346,81 +457,150 @@ export default function RoomApp() {
         </div>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_280px]">
-        <section className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-black">
-          {hasVideo ? (
+      <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
+        <div className="flex flex-col gap-3">
+          <section className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-black">
             <video
               ref={videoRef}
-              className="aspect-video w-full bg-black"
+              className={`aspect-video w-full bg-black ${hasVideo ? "" : "hidden"}`}
               playsInline
               controls={isHost}
               onPlay={onVideoPlay}
               onPause={onVideoPause}
             />
-          ) : (
-            <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-[var(--color-surface)] px-6 text-center">
-              <p className="text-sm font-medium text-[var(--color-text)]">
-                Empty sync room
-              </p>
-              <p className="max-w-sm text-xs leading-relaxed text-[var(--color-muted)]">
-                {isHost
-                  ? "Queue a public HTTPS stream URL below to start watching together."
-                  : "Waiting for the host to queue a video."}
-              </p>
-              {/* keep ref attached even when empty for later */}
-              <video ref={videoRef} className="hidden" playsInline />
-            </div>
-          )}
-          <div className="flex flex-col gap-3 border-t border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-            {!isHost ? (
-              <p className="text-xs text-[var(--color-muted)]">
-                Host controls playback and queue. Stay on this tab for best
-                sync.
-              </p>
-            ) : (
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onPlayClick}
-                  disabled={!hasVideo}
-                  className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-black disabled:opacity-40"
-                >
-                  Play
-                </button>
-                <button
-                  type="button"
-                  onClick={onPauseClick}
-                  disabled={!hasVideo}
-                  className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-40"
-                >
-                  Pause
-                </button>
-                {durationOk ? (
-                  <input
-                    type="range"
-                    min={0}
-                    max={duration}
-                    step={0.1}
-                    defaultValue={0}
-                    onChange={(e) => onSeek(Number(e.target.value))}
-                    className="min-w-[120px] flex-1"
-                    aria-label="Seek"
-                  />
-                ) : null}
-                <span className="font-mono text-xs text-[var(--color-muted)]">
-                  {playback ? formatTime(playback.positionMs) : "0:00"}
-                  {durationOk ? ` / ${formatTime(duration * 1000)}` : ""}
-                </span>
+            {!hasVideo ? (
+              <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-[var(--color-surface)] px-6 text-center">
+                <p className="text-sm font-medium text-[var(--color-text)]">
+                  Empty sync room
+                </p>
+                <p className="max-w-sm text-xs leading-relaxed text-[var(--color-muted)]">
+                  {isHost
+                    ? "Queue a public HTTPS stream URL to start watching together."
+                    : "Waiting for the host to queue a video."}
+                </p>
               </div>
-            )}
-
-            {hasVideo ? (
-              <p className="truncate font-mono text-xs text-[var(--color-muted)]">
-                Now: {playback?.videoUrl}
-              </p>
             ) : null}
-          </div>
-        </section>
+            <div className="flex flex-col gap-3 border-t border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+              {!isHost ? (
+                <p className="text-xs text-[var(--color-muted)]">
+                  Host controls playback and queue. Stay on this tab for best
+                  sync.
+                </p>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onPlayClick}
+                    disabled={!hasVideo}
+                    className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-black disabled:opacity-40"
+                  >
+                    Play
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onPauseClick}
+                    disabled={!hasVideo}
+                    className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-40"
+                  >
+                    Pause
+                  </button>
+                  {durationOk ? (
+                    <input
+                      type="range"
+                      min={0}
+                      max={duration}
+                      step={0.1}
+                      defaultValue={0}
+                      onChange={(e) => onSeek(Number(e.target.value))}
+                      className="min-w-[120px] flex-1"
+                      aria-label="Seek"
+                    />
+                  ) : null}
+                  <span className="font-mono text-xs text-[var(--color-muted)]">
+                    {playback ? formatTime(playback.positionMs) : "0:00"}
+                    {durationOk ? ` / ${formatTime(duration * 1000)}` : ""}
+                  </span>
+                </div>
+              )}
+              {hasVideo ? (
+                <p className="truncate font-mono text-xs text-[var(--color-muted)]">
+                  Now: {playback?.videoUrl}
+                </p>
+              ) : null}
+            </div>
+          </section>
+
+          {/* Chat */}
+          <section className="flex min-h-[220px] flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+            <div className="border-b border-[var(--color-border)] px-3 py-2">
+              <h2 className="text-xs font-medium tracking-wide text-[var(--color-muted)] uppercase">
+                Chat
+              </h2>
+              <p className="text-[10px] text-[var(--color-muted)]">
+                Live only — not saved. Goes away when you leave.
+              </p>
+            </div>
+            <div className="flex max-h-52 min-h-[140px] flex-1 flex-col gap-1.5 overflow-y-auto px-3 py-2">
+              {chat.length === 0 ? (
+                <p className="text-xs text-[var(--color-muted)]">
+                  No messages yet. Say hi.
+                </p>
+              ) : (
+                chat.map((m) => {
+                  const mine = m.sessionId === sessionId;
+                  return (
+                    <div key={m.id} className="text-xs leading-snug">
+                      <span className="font-mono text-[10px] text-[var(--color-muted)]">
+                        {formatChatTime(m.serverTimeMs)}{" "}
+                      </span>
+                      <span
+                        className={
+                          mine
+                            ? "font-medium text-[var(--color-accent)]"
+                            : "font-medium"
+                        }
+                      >
+                        {m.nickname}
+                      </span>
+                      <span className="text-[var(--color-muted)]">: </span>
+                      <span className="break-words text-[var(--color-text)]">
+                        {m.text}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={chatEndRef} />
+            </div>
+            <div className="flex gap-2 border-t border-[var(--color-border)] p-2">
+              <input
+                type="text"
+                value={chatDraft}
+                onChange={(e) => setChatDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    onSendChat();
+                  }
+                }}
+                maxLength={MAX_CHAT_LENGTH}
+                placeholder={
+                  conn === "open" ? "Message the room…" : "Connecting…"
+                }
+                disabled={conn !== "open"}
+                className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm outline-none focus:border-[var(--color-accent)] disabled:opacity-50"
+              />
+              <button
+                type="button"
+                onClick={onSendChat}
+                disabled={conn !== "open" || !chatDraft.trim()}
+                className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium disabled:opacity-40"
+              >
+                Send
+              </button>
+            </div>
+          </section>
+        </div>
 
         <aside className="flex flex-col gap-3">
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
@@ -464,7 +644,7 @@ export default function RoomApp() {
               </div>
             ) : null}
 
-            <ul className="mt-2 flex max-h-56 flex-col gap-1 overflow-y-auto">
+            <ul className="mt-2 flex max-h-40 flex-col gap-1 overflow-y-auto">
               {queue.map((url, i) => {
                 const active = i === queueIndex;
                 return (

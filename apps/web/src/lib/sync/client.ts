@@ -1,4 +1,5 @@
 import {
+  type ChatMessage,
   type ClientMessage,
   type Member,
   type PlaybackState,
@@ -20,6 +21,7 @@ export type SyncClientHandlers = {
   }) => void;
   onState: (state: PlaybackState, serverTimeMs: number) => void;
   onMembers: (members: Member[]) => void;
+  onChat: (message: ChatMessage) => void;
   onError: (code: string, message: string) => void;
   onClock: (serverTimeMs: number, localTimeMs: number) => void;
 };
@@ -60,6 +62,10 @@ export class SyncClient {
     this.send({ type: "set_nickname", nickname });
   }
 
+  sendChat(text: string): void {
+    this.send({ type: "chat", text });
+  }
+
   send(msg: ClientMessage): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify(msg));
@@ -82,7 +88,6 @@ export class SyncClient {
 
     ws.onmessage = (ev) => {
       if (typeof ev.data !== "string") return;
-      // hibernation auto pong
       if (ev.data === "pong") return;
 
       let raw: unknown;
@@ -116,6 +121,9 @@ export class SyncClient {
         case "members":
           this.handlers.onClock(msg.serverTimeMs, local);
           this.handlers.onMembers(msg.members);
+          break;
+        case "chat":
+          this.handlers.onChat(msg.message);
           break;
         case "error":
           this.handlers.onError(msg.code, msg.message);
@@ -165,7 +173,6 @@ export function applyDrift(
   }
 
   if (Math.abs(drift) >= softMs) {
-    // mild rate nudge toward target
     video.playbackRate = drift > 0 ? 1.04 : 0.96;
     return;
   }
