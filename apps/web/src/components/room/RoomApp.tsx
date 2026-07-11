@@ -475,7 +475,7 @@ export default function RoomApp() {
                 </p>
                 <p className="max-w-sm text-xs leading-relaxed text-[var(--color-muted)]">
                   {isHost
-                    ? "Queue a public HTTPS stream URL to start watching together."
+                    ? "Queue an http(s) stream URL to start watching together."
                     : "Waiting for the host to queue a video."}
                 </p>
               </div>
