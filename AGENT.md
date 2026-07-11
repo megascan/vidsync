@@ -1,0 +1,25 @@
+# VidSync — agent rules
+
+Anonymous watch-party: rooms sync raw video stream URLs.
+
+## Stack
+- `apps/web` — Astro 7 static, React islands, Tailwind v4, Zustand
+- `workers/api` — CF Worker + Durable Object (`Room`) WebSocket hibernation
+- `packages/shared` — protocol zod schemas + types (single source of truth)
+
+## Rules
+- bun workspaces. TypeScript strict. No `any`.
+- Frontend/backend always separate. No Astro CF adapter (static only).
+- Host-authoritative sync. One DO per room code (`getByName`).
+- HTTPS video URLs only. No media proxy MVP — client CORS is user problem.
+- No auth MVP. No chat MVP.
+- Document decisions in `DOCS/`. Debt in `TECH_DEBT.md`.
+- Public copy → de-slop before ship.
+
+## Commands
+- `bun run dev:web` — Astro
+- `bun run dev:api` — wrangler dev (DO local)
+- `PUBLIC_API_URL` web, `WEB_ORIGIN` worker
+
+## Room URL
+Pretty `/r/:code` needs host rewrite → `/room` (see DOCS/architecture.md).

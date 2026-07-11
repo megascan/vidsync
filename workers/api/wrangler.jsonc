@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "vidsync-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "WEB_ORIGIN": "http://localhost:4321"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "Room"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Room"]
+    }
+  ]
+}

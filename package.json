@@ -1,0 +1,14 @@
+{
+  "name": "vidsync",
+  "private": true,
+  "workspaces": ["apps/*", "workers/*", "packages/*"],
+  "scripts": {
+    "dev:web": "bun run --filter @vidsync/web dev",
+    "dev:api": "bun run --filter @vidsync/api dev",
+    "build": "bun run --filter @vidsync/shared build && bun run --filter @vidsync/web build && bun run --filter @vidsync/api build",
+    "check": "bun run --filter @vidsync/shared check && bun run --filter @vidsync/web check && bun run --filter @vidsync/api check"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

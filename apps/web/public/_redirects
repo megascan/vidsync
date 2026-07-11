@@ -1,0 +1,2 @@
+# Cloudflare / static hosts: pretty room URLs
+/r/*  /room  200

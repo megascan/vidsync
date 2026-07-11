@@ -1,0 +1,31 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import HomeApp from "../components/home/HomeApp";
+---
+
+<BaseLayout title="VidSync — sync raw video streams">
+  <main class="mx-auto flex min-h-full max-w-lg flex-col px-4 py-10">
+    <header class="mb-8">
+      <p class="font-mono text-xs tracking-widest text-[var(--color-accent)] uppercase">
+        VidSync
+      </p>
+      <h1 class="mt-2 text-3xl font-semibold tracking-tight">
+        Watch together. Stay in sync.
+      </h1>
+      <p class="mt-2 text-sm leading-relaxed text-[var(--color-muted)]">
+        Anonymous rooms for raw HTTPS video URLs (MP4, WebM, HLS). No accounts.
+        Everyone follows the host.
+      </p>
+    </header>
+
+    <HomeApp client:load />
+
+    <aside
+      class="mt-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs leading-relaxed text-[var(--color-muted)]"
+    >
+      <strong class="text-[var(--color-text)]">CORS note:</strong>
+      Your browser loads the media URL directly. The host must allow cross-origin
+      playback (and Range for progressive files). VidSync does not proxy video bytes.
+    </aside>
+  </main>
+</BaseLayout>
