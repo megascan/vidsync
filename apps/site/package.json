@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
+    "build": "node -e \"console.log('vidsync-web: static public/ + worker.ts, nothing to compile')\"",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
   },

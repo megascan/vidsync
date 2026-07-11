@@ -21,6 +21,7 @@ Anonymous watch-party. **Primary client: Rust desktop** (`apps/host` → `vidsyn
 - `bun run dev:desktop` — Tauri desktop
 - `cd apps/desktop && bun run tauri:build` — local installers
 - `cd apps/site && bunx wrangler deploy` — landing (needs CF auth)
+- CF Git Builds root: **`apps/site`** (not `apps/web`)
 - `bun run dev:api` — wrangler DO local
 - Prod: site `vidsync.ratt.ing`, API `api.vidsync.ratt.ing`
 - CI: `.github/workflows/desktop-release.yml` → R2 + site

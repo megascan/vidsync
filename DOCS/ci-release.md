@@ -38,16 +38,28 @@ Copy Access Key ID + Secret Access Key once (secret not shown again).
 
 **No `CLOUDFLARE_API_TOKEN` in CI.** Releases only put objects in R2. Live Worker `vidsync-web` already binds that bucket and serves `/downloads/*`, `/latest.json`, `/updater.json` from R2 on each request — no redeploy for new builds.
 
-### 4. When you *do* need wrangler (manual, rare)
+### 4. Landing Worker deploy (CF Git Builds)
 
-Only if you change **Worker code** or **static landing** (`apps/site/src/worker.ts`, `public/*` HTML/CSS/JS):
+**Worker:** `vidsync-web` · **path:** `apps/site` (not `apps/web` — that is legacy Astro)
+
+Dashboard → Worker → Settings → Builds:
+
+| Field | Value |
+|---|---|
+| **Root directory** | `apps/site` |
+| **Build command** | leave empty, or `npm install` / `bun install` |
+| **Deploy command** | `npx wrangler deploy` |
+| **Version command** (preview) | `npx wrangler versions upload` |
+
+Wrong root (`apps/web`) deploys the old browser app and never ships the new landing.
+
+Manual:
 
 ```bash
 cd apps/site
-bunx wrangler deploy   # needs CF login / API token locally
+bun install
+bunx wrangler deploy
 ```
-
-That is Workers deploy API, not R2 S3. Not part of the release workflow.
 
 ### 5. Domain
 
