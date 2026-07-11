@@ -1,5 +1,6 @@
-# Build VidSync desktop (Windows + Linux) on every push to master,
-# sign updater artifacts, upload installers to R2, deploy landing.
+# Build VidSync desktop (Windows + Linux) when app/shared source changes,
+# sign updater artifacts, upload installers to R2.
+# Skips pure docs / landing HTML / unrelated app trees.
 
 name: Desktop release
 
@@ -7,10 +8,22 @@ on:
   push:
     branches: [master]
     paths:
+      # Desktop app (UI + Rust)
       - "apps/desktop/**"
-      - "apps/site/**"
-      - ".github/workflows/desktop-release.yml"
+      # Wire protocol / shared types used by desktop + DO
       - "packages/shared/**"
+      # Release packaging helpers (latest.json / updater.json)
+      - "apps/site/scripts/**"
+      - ".github/workflows/desktop-release.yml"
+    paths-ignore:
+      - "**/*.md"
+      - "DOCS/**"
+      - "apps/site/public/**"
+      - "apps/site/src/**"
+      - "apps/web/**"
+      - "apps/host/**"
+      - "extensions/**"
+      - "workers/**"
   workflow_dispatch:
 
 concurrency:

@@ -1,6 +1,6 @@
 # Desktop CI + R2 releases + auto-update
 
-On every push to `master` (when desktop/site change), GitHub Actions:
+On push to `master` when **desktop-relevant source** changes (not docs / landing HTML), GitHub Actions:
 
 1. Builds **Windows** (NSIS + MSI) and **Linux** (AppImage + deb)
 2. Signs updater artifacts with minisign (`TAURI_SIGNING_PRIVATE_KEY`)
