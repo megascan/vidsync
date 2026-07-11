@@ -84,7 +84,8 @@ impl ServeSession {
                     mapping = Some(m);
                 }
                 Err(e) => {
-                    warn!("UPnP failed (LAN still works): {e:#}");
+                    // Multi-line hint from upnp::search_error_hint
+                    warn!("UPnP failed (LAN still works):\n{e:#}");
                 }
             }
         }
