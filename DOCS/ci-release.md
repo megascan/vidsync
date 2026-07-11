@@ -100,8 +100,11 @@ bun run tauri:build
 | `https://vidsync.ratt.ing/` | Landing page |
 | `https://vidsync.ratt.ing/latest.json` | Landing version + download paths |
 | `https://vidsync.ratt.ing/updater.json` | **Tauri auto-update** static manifest |
-| `https://vidsync.ratt.ing/downloads/windows/VidSync-windows-setup.exe` | R2 (+ `.sig`) |
-| `https://vidsync.ratt.ing/downloads/linux/VidSync-linux.AppImage` | R2 (+ `.sig`) |
+| `https://vidsync.ratt.ing/downloads/windows/VidSync-windows-setup-{ver}.exe` | R2 (+ `.sig`) — **versioned** |
+| `https://vidsync.ratt.ing/downloads/linux/VidSync-linux-{ver}.AppImage` | R2 (+ `.sig`) — **versioned** |
+
+Unversioned keys caused Workers Cache to serve a stale installer body against a
+new minisign signature → **signature verification failed** on auto-update.
 
 ### `updater.json` shape (Tauri static)
 

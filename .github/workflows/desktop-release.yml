@@ -168,6 +168,8 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p stage/downloads/windows stage/downloads/linux
 
+          # Versioned keys only — same-path overwrite + Workers Cache was serving
+          # stale installers against fresh .sig → "signature verification failed".
           stage_win() {
             local src="$1" dest="$2"
             if [ -f "$src" ]; then
@@ -181,21 +183,21 @@ jobs:
             fi
           }
 
-          stage_win artifacts/windows/VidSync-windows-setup.exe VidSync-windows-setup.exe
-          stage_win artifacts/windows/VidSync-windows-setup.exe.sig VidSync-windows-setup.exe.sig
-          stage_win artifacts/windows/VidSync-windows.msi VidSync-windows.msi
-          stage_win artifacts/windows/VidSync-windows.exe VidSync-windows.exe
+          stage_win artifacts/windows/VidSync-windows-setup.exe "VidSync-windows-setup-${VERSION}.exe"
+          stage_win artifacts/windows/VidSync-windows-setup.exe.sig "VidSync-windows-setup-${VERSION}.exe.sig"
+          stage_win artifacts/windows/VidSync-windows.msi "VidSync-windows-${VERSION}.msi"
+          stage_win artifacts/windows/VidSync-windows.exe "VidSync-windows-${VERSION}.exe"
 
-          stage_lin artifacts/linux/VidSync-linux.AppImage VidSync-linux.AppImage
-          stage_lin artifacts/linux/VidSync-linux.AppImage.sig VidSync-linux.AppImage.sig
-          stage_lin artifacts/linux/VidSync-linux.deb VidSync-linux.deb
-          stage_lin artifacts/linux/VidSync-linux VidSync-linux
+          stage_lin artifacts/linux/VidSync-linux.AppImage "VidSync-linux-${VERSION}.AppImage"
+          stage_lin artifacts/linux/VidSync-linux.AppImage.sig "VidSync-linux-${VERSION}.AppImage.sig"
+          stage_lin artifacts/linux/VidSync-linux.deb "VidSync-linux-${VERSION}.deb"
+          stage_lin artifacts/linux/VidSync-linux "VidSync-linux-${VERSION}"
 
-          if [ -f stage/downloads/linux/VidSync-linux.AppImage ]; then
-            chmod +x stage/downloads/linux/VidSync-linux.AppImage
+          if [ -f "stage/downloads/linux/VidSync-linux-${VERSION}.AppImage" ]; then
+            chmod +x "stage/downloads/linux/VidSync-linux-${VERSION}.AppImage"
           fi
-          if [ -f stage/downloads/linux/VidSync-linux ]; then
-            chmod +x stage/downloads/linux/VidSync-linux
+          if [ -f "stage/downloads/linux/VidSync-linux-${VERSION}" ]; then
+            chmod +x "stage/downloads/linux/VidSync-linux-${VERSION}"
           fi
 
           node apps/site/scripts/make-latest.mjs stage "$VERSION" "$COMMIT"

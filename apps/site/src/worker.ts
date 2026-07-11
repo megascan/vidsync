@@ -21,10 +21,11 @@ export interface Env {
 const CACHE_JSON = "public, max-age=60";
 
 /**
- * Installers — CI overwrites the same key (not content-addressed).
- * 1 day edge/browser; switch to `immutable` + long max-age once URLs are versioned.
+ * Versioned installers (`…-0.1.3.exe`) never change → long immutable cache.
+ * Legacy unversioned paths must not be cached (stale body + fresh .sig = verify fail).
  */
-const CACHE_BINARY = "public, max-age=86400";
+const CACHE_BINARY_VERSIONED = "public, max-age=31536000, immutable";
+const CACHE_BINARY_LEGACY = "public, max-age=0, must-revalidate";
 
 /** Negative cache for missing R2 objects. */
 const CACHE_NOT_FOUND = "public, max-age=30";
@@ -192,6 +193,11 @@ async function serveAssets(request: Request, env: Env): Promise<Response> {
 
 // ── Headers / helpers ───────────────────────────────────────────────────────
 
+function isVersionedDownload(key: string): boolean {
+  // e.g. VidSync-windows-setup-0.1.3.exe / VidSync-linux-0.1.3.AppImage
+  return /-\d+\.\d+\.\d+/.test(key);
+}
+
 function downloadHeaders(
   key: string,
   size: number,
@@ -199,11 +205,14 @@ function downloadHeaders(
   uploaded: Date | undefined,
 ): Headers {
   const name = key.split("/").pop() ?? "download";
+  const cache = isVersionedDownload(key)
+    ? CACHE_BINARY_VERSIONED
+    : CACHE_BINARY_LEGACY;
   const headers = new Headers({
     "Content-Type": contentType(name),
     "Content-Length": String(size),
     "Content-Disposition": `attachment; filename="${name.replace(/"/g, "")}"`,
-    "Cache-Control": CACHE_BINARY,
+    "Cache-Control": cache,
     "Cache-Tag": cacheTags(["vidsync-download", `r2:${key}`]),
     "Access-Control-Allow-Origin": "*",
     "Accept-Ranges": "bytes",

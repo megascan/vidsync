@@ -3,11 +3,7 @@
  * Build Tauri static updater.json from staged installers + .sig files.
  * Usage: node make-updater.mjs <stageDir> <version> [baseUrl]
  *
- * Expects under stageDir:
- *   downloads/windows/VidSync-windows-setup.exe
- *   downloads/windows/VidSync-windows-setup.exe.sig
- *   downloads/linux/VidSync-linux.AppImage
- *   downloads/linux/VidSync-linux.AppImage.sig
+ * Versioned paths only (avoids Workers Cache serving stale body vs new sig).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -35,14 +31,18 @@ function platform(rel) {
 }
 
 const platforms = {};
-const win = platform("downloads/windows/VidSync-windows-setup.exe");
-const lin = platform("downloads/linux/VidSync-linux.AppImage");
+const win = platform(
+  `downloads/windows/VidSync-windows-setup-${version}.exe`,
+);
+const lin = platform(`downloads/linux/VidSync-linux-${version}.AppImage`);
 
 if (win) platforms["windows-x86_64"] = win;
 if (lin) platforms["linux-x86_64"] = lin;
 
 if (Object.keys(platforms).length === 0) {
-  console.error("make-updater: no signed platforms found (need installer + .sig)");
+  console.error(
+    "make-updater: no signed platforms found (need versioned installer + .sig)",
+  );
   process.exit(1);
 }
 

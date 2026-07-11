@@ -18,7 +18,8 @@ Zone Cache Rules / Page Rules **do not** apply. Only response `Cache-Control`
 |---|---|---|---|
 | `/latest.json` | R2 `latest.json` | `public, max-age=60` | `vidsync-json`, `r2:latest.json` |
 | `/updater.json` | R2 `updater.json` | `public, max-age=60` | `vidsync-json`, `r2:updater.json` |
-| `/downloads/*` | R2 object | `public, max-age=86400` (1 day; same-key overwrite) | `vidsync-download`, `r2:<key>` |
+| `/downloads/*` versioned (`-0.1.3.`) | R2 | `public, max-age=31536000, immutable` | `vidsync-download`, `r2:<key>` |
+| `/downloads/*` legacy unversioned | R2 | `public, max-age=0, must-revalidate` | same |
 | `/downloads/*` Range | R2 ranged get | `public, max-age=3600` (206 not stored long) | same tags |
 | HTML (`/`, `*.html`) | ASSETS | `public, max-age=60` | `vidsync-asset` |
 | CSS/JS | ASSETS | `public, max-age=300` | `vidsync-asset` |

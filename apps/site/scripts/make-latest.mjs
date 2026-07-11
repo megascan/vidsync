@@ -2,6 +2,10 @@
 /**
  * Build latest.json from staged download files.
  * Usage: node make-latest.mjs <stageDir> <version> <commit>
+ *
+ * Expects versioned names:
+ *   downloads/windows/VidSync-windows-setup-{version}.exe
+ *   downloads/linux/VidSync-linux-{version}.AppImage
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -10,12 +14,6 @@ const [stageDir, version, commit] = process.argv.slice(2);
 if (!stageDir || !version || !commit) {
   console.error("usage: make-latest.mjs <stageDir> <version> <commit>");
   process.exit(1);
-}
-
-function sizeOf(rel) {
-  const p = path.join(stageDir, rel);
-  if (!fs.existsSync(p)) return null;
-  return fs.statSync(p).size;
 }
 
 function file(rel) {
@@ -27,10 +25,10 @@ function file(rel) {
   };
 }
 
-const winNsis = file("downloads/windows/VidSync-windows-setup.exe");
-const winMsi = file("downloads/windows/VidSync-windows.msi");
-const linApp = file("downloads/linux/VidSync-linux.AppImage");
-const linDeb = file("downloads/linux/VidSync-linux.deb");
+const winNsis = file(`downloads/windows/VidSync-windows-setup-${version}.exe`);
+const winMsi = file(`downloads/windows/VidSync-windows-${version}.msi`);
+const linApp = file(`downloads/linux/VidSync-linux-${version}.AppImage`);
+const linDeb = file(`downloads/linux/VidSync-linux-${version}.deb`);
 
 const latest = {
   version,
