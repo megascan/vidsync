@@ -80,6 +80,8 @@ struct HostApp {
     error: Option<String>,
     lan_url: Option<String>,
     wan_url: Option<String>,
+    /// Flash “Copied!” after a successful copy
+    copied_flash: Option<std::time::Instant>,
     session: Option<Box<ServeSession>>,
     pending: Option<Receiver<Result<Box<ServeSession>, String>>>,
     pending_stop: Option<Receiver<()>>,
@@ -98,11 +100,26 @@ impl HostApp {
             error: None,
             lan_url: None,
             wan_url: None,
+            copied_flash: None,
             session: None,
             pending: None,
             pending_stop: None,
             pending_ext: None,
         }
+    }
+
+    /// Prefer WAN (friends) else LAN.
+    fn primary_url(&self) -> Option<&str> {
+        self.wan_url
+            .as_deref()
+            .or(self.lan_url.as_deref())
+    }
+
+    fn copy_url(&mut self, ctx: &egui::Context, url: &str) {
+        ctx.copy_text(url.to_string());
+        crate::session::try_clipboard(url);
+        self.copied_flash = Some(std::time::Instant::now());
+        self.status = format!("Copied: {url}");
     }
 
     fn poll(&mut self) {
@@ -112,7 +129,7 @@ impl HostApp {
                     self.lan_url = Some(session.info.lan_url.clone());
                     self.wan_url = session.info.wan_url.clone();
                     self.status = format!(
-                        "Streaming {} on port {}",
+                        "Streaming {} on port {} — copy URL into VidSync queue",
                         session.info.file_name, session.info.local_port
                     );
                     self.session = Some(session);
@@ -370,6 +387,32 @@ impl eframe::App for HostApp {
                 {
                     self.stop_stream();
                 }
+
+                let primary = self.primary_url().map(str::to_string);
+                let can_copy = primary.is_some() && !self.busy;
+                let copy_label = if self
+                    .copied_flash
+                    .is_some_and(|t| t.elapsed().as_secs_f32() < 1.5)
+                {
+                    "Copied!"
+                } else {
+                    "Copy URL"
+                };
+                if ui
+                    .add_enabled(
+                        can_copy,
+                        egui::Button::new(RichText::new(copy_label).strong())
+                            .fill(Color32::from_rgb(46, 160, 120))
+                            .min_size(Vec2::new(100.0, 28.0)),
+                    )
+                    .on_hover_text("Copy share URL (WAN if UPnP, else LAN)")
+                    .clicked()
+                {
+                    if let Some(url) = primary {
+                        self.copy_url(ctx, &url);
+                    }
+                }
+
                 if ui
                     .add_enabled(
                         !self.busy,
@@ -386,13 +429,20 @@ impl eframe::App for HostApp {
             ui.add_space(8.0);
 
             ui.label(RichText::new("Share URL").strong());
-            if let Some(wan) = &self.wan_url {
-                url_row(ui, "WAN (UPnP)", wan);
+            // Clone for borrow-checker (url_row needs &str; copy mutates self)
+            let wan = self.wan_url.clone();
+            let lan = self.lan_url.clone();
+            if let Some(url) = &wan {
+                if url_row(ui, "WAN (UPnP)", url) {
+                    self.copy_url(ctx, url);
+                }
             }
-            if let Some(lan) = &self.lan_url {
-                url_row(ui, "LAN", lan);
+            if let Some(url) = &lan {
+                if url_row(ui, "LAN", url) {
+                    self.copy_url(ctx, url);
+                }
             }
-            if self.lan_url.is_none() && self.wan_url.is_none() {
+            if wan.is_none() && lan.is_none() {
                 ui.label(
                     RichText::new("URLs appear here after Start.")
                         .color(Color32::from_rgb(140, 145, 160))
@@ -413,7 +463,7 @@ impl eframe::App for HostApp {
             ui.add_space(8.0);
             ui.label(
                 RichText::new(
-                    "Paste URL into the VidSync room queue, then Stream with Unblock.",
+                    "Copy URL → paste into VidSync room queue → Stream with Unblock.",
                 )
                 .color(Color32::from_rgb(140, 145, 160))
                 .small(),
@@ -422,16 +472,30 @@ impl eframe::App for HostApp {
     }
 }
 
-fn url_row(ui: &mut egui::Ui, label: &str, url: &str) {
+/// Returns true if user clicked Copy on this row.
+fn url_row(ui: &mut egui::Ui, label: &str, url: &str) -> bool {
+    let mut clicked = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).small().color(Color32::from_rgb(140, 145, 160)));
-        ui.add(
-            egui::Label::new(RichText::new(url).monospace().small())
-                .wrap()
-                .sense(egui::Sense::click()),
+        ui.label(
+            RichText::new(label)
+                .small()
+                .color(Color32::from_rgb(140, 145, 160)),
         );
-        if ui.small_button("Copy").clicked() {
-            crate::session::try_clipboard(url);
+        // Selectable so user can also Ctrl+C manually
+        let mut buf = url.to_string();
+        ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .desired_width(ui.available_width() - 70.0)
+                .font(egui::TextStyle::Monospace)
+                .interactive(true)
+                .frame(false),
+        );
+        if ui
+            .add(egui::Button::new("Copy").min_size(Vec2::new(56.0, 22.0)))
+            .clicked()
+        {
+            clicked = true;
         }
     });
+    clicked
 }
