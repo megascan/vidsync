@@ -543,6 +543,19 @@ video.follower-locked::-webkit-media-controls-enclosure {
   white-space: nowrap;
 }
 
+.share-strip.warn {
+  flex-wrap: wrap;
+  background: color-mix(in srgb, var(--danger) 12%, var(--elevated-2));
+  border-top-color: color-mix(in srgb, var(--danger) 35%, var(--border-soft));
+}
+
+.share-warn {
+  flex: 1 1 100%;
+  font-size: 0.72rem;
+  color: var(--danger);
+  line-height: 1.3;
+}
+
 .side {
   display: flex;
   flex-direction: column;

@@ -175,6 +175,10 @@ async fn run_reconnect_loop(
             }
         };
 
+        // Drop stale heartbeats/seeks queued while offline so reconnect
+        // doesn't flush an outage-length backlog as "now" anchors.
+        drain_stale_control_msgs(&mut out_rx);
+
         match run_session(
             ws,
             &nickname,
@@ -247,6 +251,11 @@ fn reconnect_delay_ms(attempt: u32) -> u64 {
     // 200ms, 400, 800, 1.6s, 3.2s → cap 5s
     let exp = 200u64.saturating_mul(1u64 << attempt.min(6));
     exp.min(5_000)
+}
+
+/// Drop everything queued while offline (stale heartbeats rewind the room).
+fn drain_stale_control_msgs(out_rx: &mut mpsc::UnboundedReceiver<ClientMessage>) {
+    while out_rx.try_recv().is_ok() {}
 }
 
 async fn run_session(

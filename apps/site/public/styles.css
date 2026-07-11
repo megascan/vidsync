@@ -211,6 +211,19 @@ a:focus-visible,
   color: var(--faint);
 }
 
+.dl-note {
+  margin: 0.55rem 0 0;
+  max-width: 28rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.dl-note strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 /* —— Proof strip —— */
 
 .proof {

@@ -176,6 +176,8 @@ let busy = false;
 let mediaSettings: MediaSettings | null = null;
 let ffmpegInfo: FfmpegStatus | null = null;
 let prepareStatus = "";
+/** Sticky skip/fallback note (ffmpeg missing) — survives endPrepare. */
+let stickyPrepareNote = "";
 /** Host FFmpeg prepare overlay (not live yet — full-file remux/transcode). */
 let prepareActive = false;
 /** 0–100 when known; null = indeterminate. */
@@ -196,6 +198,10 @@ let myRttMs = 0;
 let applyingRemote = false;
 let lastVersion = -1;
 let chatDraft = "";
+/** Last chat text sent (restore on server throttle). */
+let lastChatSent = "";
+/** Session ids from last members list (join/leave detection). */
+let prevMemberKeys = new Set<string>();
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 /** Bumps when a newer applyState supersedes an in-flight one (join races). */
 let applyGen = 0;
@@ -475,15 +481,15 @@ async function applyState(state: PlaybackState, force: boolean) {
   }
   lastVersion = ver;
 
-  // Host drives local file element — never yank src/seek from own heartbeats
+  // Host drives local file element — never yank src/seek from own heartbeats.
+  // `force` only aligns seek/play; never tear down the media element.
   const drive = (!isHost && Boolean(state.videoUrl)) || force || urlChanged;
 
   if (drive && state.videoUrl) {
     applyingRemote = true;
     try {
       ensureVideoMounted();
-      const needLoad =
-        urlChanged || force || !videoHasUrl(state.videoUrl);
+      const needLoad = urlChanged || !videoHasUrl(state.videoUrl);
       if (needLoad) {
         // Start from ~host position once, then let progressive download buffer forward
         await loadVideoSrc(state.videoUrl);
@@ -497,10 +503,11 @@ async function applyState(state: PlaybackState, force: boolean) {
       }
       if (!isHost) {
         await syncFollowerPlayback(state, gen, needLoad);
-      } else {
-        // Host path when force/urlChanged (e.g. after open)
+      } else if (needLoad || urlChanged) {
+        // Host path only after real src change — skip seek-on-reconnect welcome
+        // so a reconnect doesn't yank host element backwards.
         const targetSec = expectedPos(state) / 1000;
-        if (needLoad && Number.isFinite(targetSec)) {
+        if (needLoad && Number.isFinite(targetSec) && targetSec > 1) {
           await safeSeek(targetSec, gen);
         }
         if (state.isPlaying) await safePlay();
@@ -514,6 +521,14 @@ async function applyState(state: PlaybackState, force: boolean) {
       }
     } catch (e) {
       console.warn("applyState media failed", e);
+      // Strip dead src so the next tick can retry (videoHasUrl was sticky).
+      try {
+        video.removeAttribute("src");
+        while (video.firstChild) video.removeChild(video.firstChild);
+        video.load();
+      } catch {
+        /* */
+      }
       if (gen === applyGen) {
         error =
           e instanceof Error
@@ -659,6 +674,7 @@ function flashBarText(): { text: string; err: boolean } {
     };
   }
   if (prepareStatus) return { text: prepareStatus, err: false };
+  if (stickyPrepareNote) return { text: stickyPrepareNote, err: true };
   if (status) return { text: status, err: false };
   if (!isHost) {
     return { text: hasMedia() ? "Synced to host" : "Waiting…", err: false };
@@ -945,6 +961,8 @@ function wireVideoHostEvents() {
   // Followers: host is authority — undo local pause / play / scrub / rate.
   video.addEventListener("pause", () => {
     if (isHost || applyingRemote || screen !== "room") return;
+    // Buffer-hold: pause is intentional while we build a cushion — don't fight it.
+    if (followerBuffering) return;
     if (playback?.isPlaying) {
       applyingRemote = true;
       void safePlay().finally(() => {
@@ -1014,7 +1032,8 @@ function wireVideoHostEvents() {
   );
 }
 
-// Host keepalive every 5s while in room (playing OR paused).
+// Host keepalive every 2s while in room (playing OR paused).
+// Same interval drives follower buffer sync — keep coupled until split.
 setInterval(() => {
   if (screen !== "room") return;
 
@@ -1031,6 +1050,20 @@ setInterval(() => {
     void syncFollowerPlayback(playback, applyGen, false);
   }
 }, 2000);
+
+// Persistent media error surface (loadVideoSrc uses once:true only at load time).
+video.addEventListener("error", () => {
+  if (screen !== "room" || !playback?.videoUrl) return;
+  error = mediaErrorMessage();
+  try {
+    video.removeAttribute("src");
+    while (video.firstChild) video.removeChild(video.firstChild);
+    video.load();
+  } catch {
+    /* */
+  }
+  softPaintRoom();
+});
 
 // Wire buffer events once — pause chase while network fills
 video.addEventListener("waiting", () => {
@@ -1179,6 +1212,7 @@ async function onSync(raw: unknown) {
       sessionId = ev.session_id;
       isHost = ev.is_host;
       members = ev.members;
+      prevMemberKeys = new Set(members.map((m) => m.sessionId));
       // Rough clock until first latency pong (no RTT yet)
       applyClock(ev.server_time_ms, myRttMs > 0 ? myRttMs : undefined);
       // Switch shell first so <video> has a live mount before we load media.
@@ -1196,17 +1230,46 @@ async function onSync(raw: unknown) {
     case "latency":
       applyLatency(ev.rtt_ms, ev.server_time_ms);
       break;
-    case "members":
-      members = ev.members;
+    case "members": {
+      const next = ev.members;
+      // Join/leave toasts (skip first members paint after welcome).
+      if (prevMemberKeys.size > 0) {
+        const prevById = new Map(members.map((m) => [m.sessionId, m.nickname]));
+        for (const m of next) {
+          if (!prevMemberKeys.has(m.sessionId) && m.sessionId !== sessionId) {
+            toast(`${m.nickname} joined`);
+            chat.push({ nick: "·", text: `${m.nickname} joined` });
+          }
+        }
+        for (const id of prevMemberKeys) {
+          if (!next.some((m) => m.sessionId === id) && id !== sessionId) {
+            const leftNick = prevById.get(id) ?? "Someone";
+            toast(`${leftNick} left`);
+            chat.push({ nick: "·", text: `${leftNick} left` });
+          }
+        }
+        if (chat.length > 200) chat = chat.slice(-150);
+      }
+      prevMemberKeys = new Set(next.map((m) => m.sessionId));
+      members = next;
       isHost = members.some((m) => m.sessionId === sessionId && m.isHost);
       paint();
       break;
+    }
     case "chat":
       chat.push({ nick: ev.message.nickname, text: ev.message.text });
       if (chat.length > 200) chat = chat.slice(-150);
-      paint();
+      softPaintRoom();
       break;
     case "error":
+      if (ev.code === "chat_slow_down" && !chatDraft) {
+        // Throttle after input clear — restore last sent so user can retry.
+        const input = app.querySelector<HTMLInputElement>("#chat");
+        if (input && lastChatSent) {
+          chatDraft = lastChatSent;
+          input.value = lastChatSent;
+        }
+      }
       setError(ev.message || ev.code);
       break;
     case "room_closed":
@@ -1267,7 +1330,7 @@ async function doCreate() {
 }
 
 async function doJoin() {
-  if (busy || !nick.trim() || joinCode.trim().length < 6) return;
+  if (busy || !nick.trim() || joinCode.trim().length < 8) return;
   busy = true;
   setStatus("Joining…");
   localStorage.setItem("vidsync.nick", nick.trim());
@@ -1391,10 +1454,15 @@ async function doStreamFile() {
     endPrepare();
     applyingRemote = true;
     try {
-      await loadVideoSrc(info.publicUrl ?? info.lanUrl);
+      // Host self-playback always uses LAN — WAN via router without NAT
+      // loopback hangs for ~20s and freezes the authority element.
+      await loadVideoSrc(info.lanUrl);
       await video.play().catch(() => undefined);
     } finally {
       applyingRemote = false;
+    }
+    if (!info.upnpMapped) {
+      prepareStatus = `Port ${info.localPort} not auto-forwarded — friends outside LAN may fail`;
     }
     toast(info.fileName);
   } catch (e) {
@@ -1542,13 +1610,19 @@ async function doQueueClear() {
 async function doChat() {
   const t = chatDraft.trim();
   if (!t) return;
+  lastChatSent = t;
   chatDraft = "";
+  const input = app.querySelector<HTMLInputElement>("#chat");
+  if (input) input.value = "";
   try {
     await invoke("room_chat", { text: t });
   } catch (e) {
+    // Restore draft on invoke failure (sync path uses async error event).
+    chatDraft = t;
+    if (input) input.value = t;
     setError(friendlyErr(e));
   }
-  paint();
+  softPaintRoom();
 }
 
 function copy(text: string) {
@@ -1569,6 +1643,18 @@ function friendlyErr(e: unknown): string {
 function shortUrl(u: string): string {
   try {
     const x = new URL(u);
+    // Prefer original filename for /s/{token}/{name} share URLs.
+    const segs = x.pathname.split("/").filter(Boolean);
+    if (segs[0] === "s" && segs.length >= 3) {
+      const name = decodeURIComponent(segs[segs.length - 1] ?? "");
+      if (name) {
+        return name.length > 36 ? `${name.slice(0, 34)}…` : name;
+      }
+    }
+    const last = segs[segs.length - 1] ?? "";
+    if (last && last.length > 2 && !/^[a-z0-9]{8,}$/i.test(last)) {
+      return last.length > 36 ? `${last.slice(0, 34)}…` : last;
+    }
     const path =
       x.pathname.length > 22 ? `${x.pathname.slice(0, 22)}…` : x.pathname;
     return `${x.hostname}${path}`;
@@ -1624,7 +1710,8 @@ async function checkForUpdates() {
     }
     pendingUpdate = update;
     updateUi = { phase: "available", version: update.version };
-    paint();
+    if (screen === "room") softPaintRoom();
+    else paint();
   } catch (e) {
     // Offline / first boot without endpoint — silent
     console.warn("update check failed", e);
@@ -1636,7 +1723,8 @@ async function doInstallUpdate() {
   updateBusy = true;
   const version = pendingUpdate.version;
   updateUi = { phase: "downloading", version, pct: null };
-  paint();
+  if (screen === "room") softPaintRoom();
+  else paint();
   try {
     let downloaded = 0;
     let total: number | null = null;
@@ -1644,7 +1732,8 @@ async function doInstallUpdate() {
       if (event.event === "Started") {
         total = event.data.contentLength ?? null;
         updateUi = { phase: "downloading", version, pct: total ? 0 : null };
-        paint();
+        if (screen === "room") softPaintRoom();
+        else paint();
       } else if (event.event === "Progress") {
         downloaded += event.data.chunkLength;
         const pct =
@@ -1652,14 +1741,17 @@ async function doInstallUpdate() {
             ? Math.min(99, Math.round((downloaded / total) * 100))
             : null;
         updateUi = { phase: "downloading", version, pct };
-        paint();
+        if (screen === "room") softPaintRoom();
+        else paint();
       } else if (event.event === "Finished") {
         updateUi = { phase: "ready", version };
-        paint();
+        if (screen === "room") softPaintRoom();
+        else paint();
       }
     });
     updateUi = { phase: "ready", version };
-    paint();
+    if (screen === "room") softPaintRoom();
+    else paint();
     // Windows exits during install; relaunch for Linux/macOS
     await relaunch();
   } catch (e) {
@@ -1668,9 +1760,27 @@ async function doInstallUpdate() {
       message: friendlyErr(e) || "Update failed",
     };
     pendingUpdate = null;
-    paint();
+    if (screen === "room") softPaintRoom();
+    else paint();
   } finally {
     updateBusy = false;
+  }
+}
+
+function syncUpdateBanner() {
+  const root = app.querySelector(".screen");
+  if (!root) return;
+  const existing = root.querySelector(".update-banner");
+  const html = updateBannerHtml();
+  if (!html) {
+    existing?.remove();
+    return;
+  }
+  if (existing) {
+    // Replace in place so soft paint mid-download updates pct.
+    existing.outerHTML = html;
+  } else {
+    root.insertAdjacentHTML("afterbegin", html);
   }
 }
 
@@ -1752,16 +1862,16 @@ function bindUiOnce() {
         void doQueueClear();
         break;
       case "play":
+        // video.onplay → host_play; do not double-send.
         void video.play();
-        void invoke("host_play", {
-          positionMs: (video.currentTime || 0) * 1000,
-        });
         break;
       case "pause":
+        // video.onpause → host_pause
         video.pause();
-        void invoke("host_pause", {
-          positionMs: (video.currentTime || 0) * 1000,
-        });
+        break;
+      case "retryMedia":
+        error = "";
+        if (playback) void applyState(playback, true);
         break;
       case "copyShare":
         if (streamInfo) copy(streamInfo.publicUrl ?? streamInfo.lanUrl);
@@ -1802,10 +1912,11 @@ function bindUiOnce() {
       const create = app.querySelector<HTMLButtonElement>("#create");
       if (create) create.disabled = busy || !nick.trim();
     } else if (el.id === "join") {
-      joinCode = el.value.toUpperCase();
+      // Normalize: strip separators, O→0 / I→1, alphabet only, max 8.
+      joinCode = normalizeJoinCode(el.value);
       el.value = joinCode;
       const joinBtn = app.querySelector<HTMLButtonElement>("#joinBtn");
-      if (joinBtn) joinBtn.disabled = busy || joinCode.trim().length < 6;
+      if (joinBtn) joinBtn.disabled = busy || joinCode.trim().length < 8;
     } else if (el.id === "chat") {
       chatDraft = el.value;
     }
@@ -1832,9 +1943,22 @@ function bindUiOnce() {
     }
     if (e.key === "Enter" && t.id === "nick" && !e.shiftKey) {
       e.preventDefault();
-      void doCreate();
+      // Don't silently create a room — focus join (muscle memory from forms).
+      const join = app.querySelector<HTMLInputElement>("#join");
+      if (join) join.focus();
     }
   });
+}
+
+/** Room codes are 8 chars from a Crockford-like alphabet (no I/L/O/U). */
+function normalizeJoinCode(raw: string): string {
+  return raw
+    .toUpperCase()
+    .replace(/[\s\-_.]/g, "")
+    .replace(/O/g, "0")
+    .replace(/[IL]/g, "1")
+    .replace(/[^0-9A-HJ-NP-TV-Z]/g, "")
+    .slice(0, 8);
 }
 
 function softPaintRoom() {
@@ -1933,15 +2057,27 @@ function softPaintRoom() {
 
   const chatLog = app.querySelector("#chatLog");
   if (chatLog) {
-    chatLog.innerHTML =
-      chat
-        .map(
-          (c) =>
-            `<div class="line"><span class="nick">${escapeHtml(c.nick)}</span>${escapeHtml(c.text)}</div>`,
-        )
-        .join("") || `<div class="empty">Say something</div>`;
-    chatLog.scrollTop = chatLog.scrollHeight;
+    const sig = `${chat.length}:${chat[chat.length - 1]?.text ?? ""}:${chat[chat.length - 1]?.nick ?? ""}`;
+    const prevSig = chatLog.getAttribute("data-chat-sig");
+    if (sig !== prevSig) {
+      const nearBottom =
+        chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 48;
+      chatLog.innerHTML =
+        chat
+          .map(
+            (c) =>
+              `<div class="line"><span class="nick">${escapeHtml(c.nick)}</span>${escapeHtml(c.text)}</div>`,
+          )
+          .join("") || `<div class="empty">Say something</div>`;
+      chatLog.setAttribute("data-chat-sig", sig);
+      if (nearBottom || prevSig == null) {
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+    }
   }
+
+  // Update banner can change while soft-painting (download progress mid-room).
+  syncUpdateBanner();
   const pill = app.querySelector(".pill");
   if (pill) {
     pill.className = `pill ${isHost ? "host" : "viewer"}`;
@@ -2010,10 +2146,10 @@ function paint() {
             <div class="divider">or join</div>
             <div class="join-row">
               <input id="join" autocomplete="off" spellcheck="false"
-                placeholder="Room code"
+                placeholder="8-character code" maxlength="12"
                 value="${escapeAttr(joinCode)}" ${busy ? "disabled" : ""} />
               <button type="button" id="joinBtn"
-                ${busy || joinCode.trim().length < 6 ? "disabled" : ""}>
+                ${busy || joinCode.trim().length < 8 ? "disabled" : ""}>
                 Join
               </button>
             </div>
@@ -2104,10 +2240,23 @@ function paint() {
           </div>
           ${
             streamInfo
-              ? `<div class="share-strip">
+              ? `<div class="share-strip${streamInfo.upnpMapped ? "" : " warn"}">
                   <span class="label">Sharing</span>
                   <span class="name" title="${escapeAttr(streamInfo.publicUrl ?? streamInfo.lanUrl)}">${escapeHtml(fileLabel || "stream")}</span>
                   <button type="button" class="ghost" id="copyShare">Copy link</button>
+                  ${
+                    !streamInfo.upnpMapped
+                      ? `<span class="share-warn" title="UPnP failed — forward TCP ${streamInfo.localPort} on your router">Couldn't auto-forward port ${streamInfo.localPort} — friends outside LAN can't connect</span>`
+                      : ""
+                  }
+                </div>`
+              : ""
+          }
+          ${
+            error && hasMedia()
+              ? `<div class="share-strip warn">
+                  <span class="share-warn">${escapeHtml(error)}</span>
+                  <button type="button" class="ghost" id="retryMedia">Retry</button>
                 </div>`
               : ""
           }
@@ -2279,6 +2428,10 @@ async function boot() {
   } catch {
     appVersion = "";
   }
+  // Re-check updates while long-running (boot only was freezing mid-room).
+  window.setInterval(() => {
+    void checkForUpdates();
+  }, 6 * 60 * 60 * 1000);
   await listen("sync-event", (e) => {
     void onSync(e.payload);
   });
@@ -2295,6 +2448,13 @@ async function boot() {
     }
     prepareStatus = p.message || p.phase || "Working…";
     status = prepareStatus;
+    // Skip/fallback warnings stick after prepare ends (ffmpeg missing etc.).
+    if (
+      (phase === "skip" || phase === "fallback") &&
+      /not found|install|path|fallback/i.test(prepareStatus)
+    ) {
+      stickyPrepareNote = prepareStatus;
+    }
     // Keep overlay up through convert; cache-hit 100% is instant, still flash bar
     if (!terminal || (preparePct != null && preparePct < 100)) {
       prepareActive = true;
@@ -2304,6 +2464,7 @@ async function boot() {
       // Just pin bar at 100 for cache/skip so user sees completion.
       if (phase === "cache" || phase === "done") {
         preparePct = 100;
+        stickyPrepareNote = "";
       }
     }
     // Soft update only — full paint during prepare would thrash

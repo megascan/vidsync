@@ -16,9 +16,11 @@ on:
       - ".github/workflows/desktop-release.yml"
   workflow_dispatch:
 
+# Build jobs may cancel mid-compile; publish must NOT — mid-upload cancel
+# leaves live manifests pointing at missing binaries.
 concurrency:
-  group: desktop-release
-  cancel-in-progress: true
+  group: desktop-release-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: read
@@ -161,7 +163,11 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    # Always require master — workflow_dispatch from a feature branch must not overwrite prod.
+    if: github.ref == 'refs/heads/master'
+    concurrency:
+      group: desktop-release-publish
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -223,6 +229,7 @@ jobs:
           stage_win artifacts/windows/VidSync-windows-setup.exe "VidSync-windows-setup-${VERSION}.exe"
           stage_win artifacts/windows/VidSync-windows-setup.exe.sig "VidSync-windows-setup-${VERSION}.exe.sig"
           stage_win artifacts/windows/VidSync-windows.msi "VidSync-windows-${VERSION}.msi"
+          stage_win artifacts/windows/VidSync-windows.msi.sig "VidSync-windows-${VERSION}.msi.sig"
           stage_win artifacts/windows/VidSync-windows.exe "VidSync-windows-${VERSION}.exe"
 
           stage_lin artifacts/linux/VidSync-linux.AppImage "VidSync-linux-${VERSION}.AppImage"
@@ -240,8 +247,8 @@ jobs:
 
           node apps/site/scripts/make-latest.mjs stage "$VERSION" "$COMMIT"
           node apps/site/scripts/make-updater.mjs stage "$VERSION" "https://vidsync.ratt.ing"
-          cp stage/latest.json apps/site/public/latest.json
-          cp stage/updater.json apps/site/public/updater.json
+          # Manifests live only on R2 (Worker serves them). Do not copy into
+          # apps/site/public — CF Git Builds deploys HTML/assets, not release JSON.
           echo "--- staged files ---"
           find stage -type f -printf '%p %s\n'
 
@@ -259,6 +266,26 @@ jobs:
           fi
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
+          # Refuse to overwrite an existing versioned installer (re-run would
+          # publish different bytes under immutable cache → bad sig forever).
+          refuse_if_exists() {
+            local key="$1"
+            if aws s3api head-object --bucket "$R2_BUCKET" --key "$key" --endpoint-url "$ENDPOINT" >/dev/null 2>&1; then
+              echo "Refusing overwrite of existing key: $key (re-run of same version)"
+              exit 1
+            fi
+          }
+          for f in stage/downloads/windows/*; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in *.sig) continue ;; esac
+            refuse_if_exists "downloads/windows/$(basename "$f")"
+          done
+          for f in stage/downloads/linux/*; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in *.sig) continue ;; esac
+            refuse_if_exists "downloads/linux/$(basename "$f")"
+          done
+
           upload() {
             local file="$1"
             local key="$2"
@@ -266,8 +293,7 @@ jobs:
             aws s3 cp "$file" "s3://${R2_BUCKET}/${key}" --endpoint-url "$ENDPOINT"
           }
 
-          upload stage/latest.json latest.json
-          upload stage/updater.json updater.json
+          # Binaries first, then latest.json, updater.json last (manifest = commit point).
           for f in stage/downloads/windows/*; do
             [ -f "$f" ] || continue
             upload "$f" "downloads/windows/$(basename "$f")"
@@ -276,7 +302,9 @@ jobs:
             [ -f "$f" ] || continue
             upload "$f" "downloads/linux/$(basename "$f")"
           done
+          upload stage/latest.json latest.json
+          upload stage/updater.json updater.json
 
       # No wrangler here. Live Worker reads R2 — new binaries/json go live without redeploy.
-      # Site code (worker.ts / public HTML) changes: deploy manually:
+      # Site code (worker.ts / public HTML) changes: CF Git Builds on apps/site, or:
       #   cd apps/site && bunx wrangler deploy

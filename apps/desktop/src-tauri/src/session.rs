@@ -46,9 +46,17 @@ impl MediaHub {
     pub async fn start(port: u16, upnp: bool) -> Result<Self> {
         let registry: FileRegistry = Arc::new(tokio::sync::RwLock::new(Default::default()));
 
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
-            .await
-            .with_context(|| format!("bind 0.0.0.0:{port}"))?;
+        // Prefer fixed port; fall back to ephemeral if 8765 is taken.
+        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+            Ok(l) => l,
+            Err(e) if port != 0 => {
+                warn!("bind 0.0.0.0:{port} failed ({e}); trying ephemeral port");
+                tokio::net::TcpListener::bind("0.0.0.0:0")
+                    .await
+                    .context("bind 0.0.0.0:0")?
+            }
+            Err(e) => return Err(e).context(format!("bind 0.0.0.0:{port}")),
+        };
         let local_port = listener.local_addr()?.port();
         let lan_ip = net::lan_ipv4().unwrap_or(std::net::Ipv4Addr::LOCALHOST);
         let lan_base = format!("http://{lan_ip}:{local_port}");
@@ -58,11 +66,14 @@ impl MediaHub {
         let mut external_port = local_port;
         let mut public_ip_from_upnp = None;
 
+        // Finite lease (1h) so a crash doesn't leave a permanent hole.
+        // Router will expire; graceful stop still removes immediately.
+        const UPNP_LEASE_SECS: u32 = 3600;
         if upnp {
-            match upnp::map_tcp(lan_ip, local_port, 0, 0).await {
+            match upnp::map_tcp(lan_ip, local_port, 0, UPNP_LEASE_SECS).await {
                 Ok(m) => {
                     info!(
-                        "UPnP {} → {}:{}",
+                        "UPnP {} → {}:{} (lease {UPNP_LEASE_SECS}s)",
                         m.gateway_addr, m.external_port, local_port
                     );
                     external_port = m.external_port;
@@ -74,14 +85,21 @@ impl MediaHub {
             }
         }
 
-        let public_ip = if let Some(ip) = public_ip_from_upnp {
-            if net::is_globally_routable_v4(ip) {
-                Some(ip)
+        // Only advertise a WAN base when UPnP actually mapped (or we know
+        // the port is open). A public IP from HTTP lookup without a mapping
+        // is a dead URL for remote peers.
+        let public_ip = if upnp_mapped {
+            if let Some(ip) = public_ip_from_upnp {
+                if net::is_globally_routable_v4(ip) {
+                    Some(ip)
+                } else {
+                    net::public_ipv4().await
+                }
             } else {
                 net::public_ipv4().await
             }
         } else {
-            net::public_ipv4().await
+            None
         };
 
         let public_base =
@@ -130,7 +148,8 @@ impl MediaHub {
             bail!("not a file: {}", file.display());
         }
 
-        let token = server::random_token();
+        // Deterministic token resurrects queue URLs after hub restart.
+        let token = server::token_for_path(&file);
         let file_name = file
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())

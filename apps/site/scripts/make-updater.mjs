@@ -46,13 +46,20 @@ const platforms = {};
 const winNsis = platform(
   `downloads/windows/VidSync-windows-setup-${version}.exe`,
 );
+const winMsi = platform(
+  `downloads/windows/VidSync-windows-${version}.msi`,
+);
 const linApp = platform(`downloads/linux/VidSync-linux-${version}.AppImage`);
 const linDeb = platform(`downloads/linux/VidSync-linux-${version}.deb`);
 
 // Format-specific keys first (plugin prefers `{os}-{arch}-{installer}`)
 if (winNsis) {
   platforms["windows-x86_64-nsis"] = winNsis;
+  // Default windows-x86_64 → NSIS (matches primary landing download).
   platforms["windows-x86_64"] = winNsis;
+}
+if (winMsi) {
+  platforms["windows-x86_64-msi"] = winMsi;
 }
 if (linApp) {
   platforms["linux-x86_64-appimage"] = linApp;

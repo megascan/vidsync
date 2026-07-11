@@ -107,3 +107,49 @@ pub fn cache_dir() -> PathBuf {
     let _ = fs::create_dir_all(&p);
     p
 }
+
+/// Drop oldest cache files until total size ≤ `max_bytes`. Ignores errors.
+pub fn prune_cache(max_bytes: u64) {
+    let dir = cache_dir();
+    let Ok(rd) = fs::read_dir(&dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total: u64 = 0;
+    for e in rd.flatten() {
+        let path = e.path();
+        if !path.is_file() {
+            continue;
+        }
+        // Never keep partial outputs
+        if path.extension().and_then(|x| x.to_str()) == Some("part")
+            || path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".part"))
+                .unwrap_or(false)
+        {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        let Ok(meta) = e.metadata() else {
+            continue;
+        };
+        let len = meta.len();
+        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        total = total.saturating_add(len);
+        files.push((path, len, modified));
+    }
+    if total <= max_bytes {
+        return;
+    }
+    files.sort_by_key(|(_, _, m)| *m); // oldest first
+    for (path, len, _) in files {
+        if total <= max_bytes {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+        }
+    }
+}

@@ -37,6 +37,27 @@ pub fn random_token() -> String {
         .collect()
 }
 
+/// Stable per-path token so re-register after hub restart resurrects queue URLs.
+pub fn token_for_path(path: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    const ALPH: &[u8] = b"abcdefghijkmnopqrstuvwxyz23456789";
+    let mut h = DefaultHasher::new();
+    // Canonical path string — same file → same token on this machine.
+    path.to_string_lossy().hash(&mut h);
+    "vidsync-serve-v1".hash(&mut h);
+    let mut n = h.finish();
+    let mut out = String::with_capacity(12);
+    for _ in 0..12 {
+        out.push(ALPH[(n % ALPH.len() as u64) as usize] as char);
+        n = n
+            .wrapping_div(ALPH.len() as u64)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(1);
+    }
+    out
+}
+
 pub fn guess_mime(path: &Path) -> String {
     // Prefer extension map — WebKitGTK/GStreamer sniffs type from path + Content-Type.
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -117,13 +138,9 @@ pub fn router(registry: FileRegistry) -> Router {
         .layer(cors)
 }
 
-async fn index(State(reg): State<FileRegistry>) -> impl IntoResponse {
-    let n = reg.read().await.len();
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        format!("VidSync Host\nfiles: {n}\n"),
-    )
+async fn index(State(_reg): State<FileRegistry>) -> impl IntoResponse {
+    // Do not fingerprint the host on the internet-exposed port.
+    StatusCode::NOT_FOUND
 }
 
 async fn stream_token(

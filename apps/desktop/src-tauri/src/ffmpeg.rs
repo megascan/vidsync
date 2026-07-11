@@ -78,7 +78,10 @@ pub fn resolve_bin(settings: &MediaSettings, name: &str) -> PathBuf {
 
 pub async fn status(settings: &MediaSettings) -> FfmpegStatus {
     let ff = resolve_bin(settings, "ffmpeg");
-    match Command::new(&ff).arg("-version").output().await {
+    let mut cmd = Command::new(&ff);
+    cmd.arg("-version");
+    apply_no_window(&mut cmd);
+    match cmd.output().await {
         Ok(out) if out.status.success() => {
             let line = String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -184,6 +187,8 @@ async fn prepare_inner(
         }
         PrepareKind::Remux => {
             emit_progress(app, "remux", "Remuxing (lossless copy)…", Some(15)).await;
+            // Scale timeout with file size (HDD + big MKV) — fixed 180s killed real files.
+            let remux_timeout = remux_timeout_for(input);
             let out = run_ffmpeg(
                 app,
                 settings,
@@ -191,7 +196,7 @@ async fn prepare_inner(
                 &settings.remux_args,
                 "remux",
                 probe.duration_secs,
-                Duration::from_secs(180),
+                remux_timeout,
             )
             .await?;
             emit_progress(app, "done", "Ready (remux)", Some(100)).await;
@@ -384,6 +389,13 @@ fn apply_no_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
+fn remux_timeout_for(input: &Path) -> Duration {
+    let size = std::fs::metadata(input).map(|m| m.len()).unwrap_or(0);
+    // ~3 min base + 1 min per 5GB, cap 45 min
+    let extra = (size / (5 * 1024 * 1024 * 1024)).saturating_mul(60);
+    Duration::from_secs((180 + extra).min(45 * 60).max(180))
+}
+
 async fn run_ffmpeg(
     app: &AppHandle,
     settings: &MediaSettings,
@@ -399,6 +411,14 @@ async fn run_ffmpeg(
         emit_progress(app, "cache", "Using cached convert", Some(100)).await;
         return Ok(out);
     }
+
+    // Write to .part then rename — crash mid-transcode must not poison cache.
+    let part = {
+        let mut p = out.as_os_str().to_owned();
+        p.push(".part");
+        PathBuf::from(p)
+    };
+    let _ = std::fs::remove_file(&part);
 
     let ffmpeg = resolve_bin(settings, "ffmpeg");
     // -progress pipe:1 → newline key=value on stdout (reliable %).
@@ -417,7 +437,7 @@ async fn run_ffmpeg(
     for tok in shell_split(args_line) {
         args.push(tok);
     }
-    args.push(out.display().to_string());
+    args.push(part.display().to_string());
 
     info!("ffmpeg {} {:?}", ffmpeg.display(), args);
     let kind = if tag.contains("x264") || tag == "transcode" {
@@ -431,7 +451,8 @@ async fn run_ffmpeg(
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     apply_no_window(&mut cmd);
 
     let mut child = cmd
@@ -481,18 +502,28 @@ async fn run_ffmpeg(
         Ok(r) => r?,
         Err(_) => {
             let _ = child.kill().await;
-            let _ = std::fs::remove_file(&out);
+            let _ = std::fs::remove_file(&part);
             bail!("ffmpeg timed out after {timeout:?}");
         }
     };
 
     if !status.success() {
-        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&part);
         bail!("ffmpeg exited with {status}");
     }
-    if !out.is_file() {
+    if !part.is_file() {
         bail!("ffmpeg produced no output");
     }
+    // Atomic-ish publish into cache path
+    let _ = std::fs::remove_file(&out);
+    std::fs::rename(&part, &out).with_context(|| {
+        format!(
+            "rename {} → {}",
+            part.display(),
+            out.display()
+        )
+    })?;
+    media_settings::prune_cache(10 * 1024 * 1024 * 1024); // 10 GiB cap
     emit_progress(app, "done", "Ready", Some(100)).await;
     Ok(out)
 }

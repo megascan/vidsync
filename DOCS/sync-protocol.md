@@ -18,6 +18,8 @@ Expected position while playing:
 `hostOneWayMs ≈ host.rttMs / 2` — host sampled position before the packet
 hit the DO; media advanced that much while in flight.
 
+Helper: `expectedPositionMs()` in `packages/shared` (server uses this on host reclaim / promote so reconnect does not rewind the room).
+
 ## Latency (`ping` / `pong`)
 
 | Dir | Msg | Fields |
@@ -34,7 +36,7 @@ Desktop pings every ~2s (plus one right after hello).
 `hello`, `ping`, `queue_add`, `queue_remove`, `queue_play`, `queue_clear`, `set_url`, `play`, `pause`, `seek`, `heartbeat`, `transfer_host`, `set_nickname`, `chat`
 
 ## Server → client
-`welcome`, `state`, `members`, `pong`, `chat`, `error`
+`welcome`, `state`, `members`, `pong`, `chat`, `error`, `room_closed` (defined; not currently emitted by any production path)
 
 ## Chat (stateless)
 - `chat` is broadcast-only — not written to DO storage
@@ -43,8 +45,12 @@ Desktop pings every ~2s (plus one right after hello).
 - Client may keep a short local scrollback only
 
 ## Authority
-Only host control msgs. Host WS drop does not dissolve; **45s without host packets** does.
-Max 20 members. Host heartbeat **~5s always** while in room (play or pause) → throttled state broadcast + room liveness.
+Only host control msgs. Host WS drop does **not** dissolve the room.
+
+- **Host reclaim:** same `clientKey` may instant-reclaim on hello when the prior host socket is dead. Other members wait `HOST_RECLAIM_MS` (60s), then oldest hello'd member is promoted.
+- **Empty wipe:** no sockets for `EMPTY_ROOM_GRACE_MS` (10 min).
+- Max 20 members (counted after hello). Pre-hello sockets age out at ~30s.
+- Host heartbeat **~2s** while in room (play or pause). DO applies position every heartbeat; version bump + state broadcast about every **8s**.
 
 ## Client reconnect (DO drops)
 
@@ -52,7 +58,6 @@ Cloudflare DO WebSockets can drop (hibernation / edge). Clients must reconnect:
 
 | Client | Behavior |
 |---|---|
-| Desktop | Auto-reconnect with backoff (0.5s→10s). Emits `reconnecting` then new `welcome`. Stops on user leave or `room_closed`. Host **MediaHub keeps running** across reconnect. |
-| Web | Same pattern in `SyncClient` |
+| Desktop | Auto-reconnect with backoff (200ms→5s). Emits `reconnecting` then new `welcome`. Stops on user leave or `room_closed`. Stale outbound heartbeats drained before new session. Host **MediaHub keeps running** across reconnect. |
 
-SessionId changes after reconnect; server re-claims host if previous host socket is dead.
+SessionId changes after reconnect. Server re-claims host only for the same `clientKey` (or after reclaim grace → promote).

@@ -4,11 +4,12 @@ On push to `master` when **desktop-relevant source** changes (not docs / landing
 
 1. Builds **Windows** (NSIS + MSI) and **Linux** (AppImage + deb)
 2. Signs updater artifacts with minisign (`TAURI_SIGNING_PRIVATE_KEY`)
-3. Uploads binaries + `.sig` to R2 bucket `vidsync`
-4. Writes `latest.json` (landing) + `updater.json` (Tauri static endpoint)
-5. Deploys landing Worker to **vidsync.ratt.ing**
+3. Uploads **binaries + `.sig` first**, then `latest.json`, then `updater.json` last (manifest = commit point)
+4. Refuses overwrite of existing versioned keys (re-run must bump version via `GITHUB_RUN_ATTEMPT`)
 
-Workflow: `.github/workflows/desktop-release.yml`
+**Does not** deploy the landing Worker. Site Worker code ships via **CF Git Builds** (`apps/site`) or manual `wrangler deploy`. Live Worker already binds the R2 bucket and serves new objects without redeploy.
+
+Workflow: `.github/workflows/desktop-release.yml`. Publish only runs on `refs/heads/master` (not feature-branch `workflow_dispatch`).
 
 ## One-time Cloudflare setup
 

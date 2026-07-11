@@ -219,8 +219,14 @@ try {
     primaryOs = "linux";
     secondaryPkg = winPkg;
     secondaryOs = winPkg ? "windows" : null;
+  } else if (os === "macos") {
+    // No mac build yet — do not pretend Windows is the right primary.
+    primaryPkg = null;
+    primaryOs = null;
+    secondaryPkg = winPkg || linPkg;
+    secondaryOs = winPkg ? "windows" : linPkg ? "linux" : null;
   } else if (winPkg) {
-    // macOS / unknown: prefer Windows as default primary
+    // Unknown OS: Windows as default primary
     primaryPkg = winPkg;
     primaryOs = "windows";
     secondaryPkg = linPkg;
@@ -232,7 +238,23 @@ try {
     secondaryOs = null;
   }
 
-  if (!primaryPkg) {
+  if (os === "macos" && !primaryPkg) {
+    showUnavailable(
+      "macOS builds not available yet",
+      "Use Windows or Linux, or watch GitHub for mac releases",
+    );
+    if (secondaryPkg && secondaryOs && secondaryWrap && secondary) {
+      secondaryWrap.hidden = false;
+      setLink(secondary, {
+        href: secondaryPkg.href,
+        label:
+          secondaryOs === "windows"
+            ? "Download for Windows"
+            : "Download for Linux",
+        meta: "",
+      });
+    }
+  } else if (!primaryPkg) {
     showUnavailable("Downloads unavailable", "Check back after the next release");
   } else {
     primary?.classList.remove("is-error");

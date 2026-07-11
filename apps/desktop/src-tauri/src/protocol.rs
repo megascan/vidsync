@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const HOST_HEARTBEAT_MS: u64 = 5000;
-pub const CLIENT_HEADER: &str = "desktop/0.2.0";
+pub const HOST_HEARTBEAT_MS: u64 = 2000;
+pub const CLIENT_HEADER: &str =
+    concat!("desktop/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

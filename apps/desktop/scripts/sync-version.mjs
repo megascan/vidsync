@@ -73,7 +73,12 @@ if (args.includes("--ci")) {
     process.exit(1);
   }
   // Always strictly greater than committed package version; tracks CI run.
-  const patch = Math.max(cur.patch + 1, run);
+  // Fold run_attempt so a re-run of a green job cannot republish same version
+  // with different bytes under an immutable R2 key.
+  const attempt = Number(process.env.GITHUB_RUN_ATTEMPT || "1");
+  const attemptSuffix =
+    Number.isFinite(attempt) && attempt > 1 ? attempt - 1 : 0;
+  const patch = Math.max(cur.patch + 1, run) + attemptSuffix * 1000;
   const next = format({ major: cur.major, minor: cur.minor, patch });
   writeAll(next);
   // Expose for later workflow steps

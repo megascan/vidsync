@@ -131,7 +131,7 @@ async function serveDownload(
   }
 
   // Range: edge cache still works; R2 get with range for uncached partials
-  const range = parseRange(request.headers.get("Range"));
+  const rawRange = parseRange(request.headers.get("Range"));
 
   if (request.method === "HEAD") {
     const head = await env.DOWNLOADS.head(key);
@@ -142,22 +142,34 @@ async function serveDownload(
     });
   }
 
-  if (range) {
+  if (rawRange) {
+    // Need size to clamp end / return 416 when offset past EOF.
+    const head = await env.DOWNLOADS.head(key);
+    if (!head) return notFound(CACHE_NOT_FOUND, ["vidsync-download", `r2:${key}`]);
+    const size = head.size;
+    if (rawRange.offset >= size) {
+      const headers = downloadHeaders(key, size, head.httpEtag, head.uploaded);
+      headers.set("Content-Range", `bytes */${size}`);
+      headers.set("Content-Length", "0");
+      return new Response(null, { status: 416, headers });
+    }
+    const start = rawRange.offset;
+    const unclampedEnd =
+      rawRange.length != null
+        ? rawRange.offset + rawRange.length - 1
+        : size - 1;
+    const end = Math.min(unclampedEnd, size - 1);
+    const length = end - start + 1;
+
     // Partial responses (206) are not stored by Workers Cache — serve from R2.
     const obj = await env.DOWNLOADS.get(key, {
-      range: { offset: range.offset, length: range.length },
+      range: { offset: start, length },
     });
     if (!obj) return notFound(CACHE_NOT_FOUND, ["vidsync-download", `r2:${key}`]);
 
-    const size = obj.size;
-    const start = range.offset;
-    const end =
-      range.length != null
-        ? range.offset + range.length - 1
-        : Math.max(0, size - 1);
     const headers = downloadHeaders(key, size, obj.httpEtag, obj.uploaded);
     headers.set("Content-Range", `bytes ${start}-${end}/${size}`);
-    headers.set("Content-Length", String(end - start + 1));
+    headers.set("Content-Length", String(length));
     // Do not mark 206 as immutable long-cache; browsers use full-object cache.
     headers.set("Cache-Control", "public, max-age=3600");
     return new Response(obj.body, { status: 206, headers });

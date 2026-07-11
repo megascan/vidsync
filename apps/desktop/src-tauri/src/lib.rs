@@ -47,12 +47,36 @@ fn install_sync(app: &AppHandle, state: &AppState, handle: sync::SyncHandle) -> 
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        // Track our session so Members events can flip is_host after promote.
+        let mut my_session: Option<String> = None;
         while let Some(ev) = events.recv().await {
-            if let SyncEvent::Welcome { is_host, .. } = &ev {
-                if let Some(st) = app.try_state::<AppState>() {
-                    if let Ok(mut h) = st.is_host.lock() {
-                        *h = *is_host;
+            if let Some(st) = app.try_state::<AppState>() {
+                match &ev {
+                    SyncEvent::Welcome {
+                        is_host,
+                        session_id,
+                        ..
+                    } => {
+                        my_session = Some(session_id.clone());
+                        if let Ok(mut h) = st.is_host.lock() {
+                            *h = *is_host;
+                        }
                     }
+                    SyncEvent::Members { members } => {
+                        if let Some(sid) = my_session.as_deref() {
+                            let host = members.iter().any(|m| m.session_id == sid && m.is_host);
+                            if let Ok(mut h) = st.is_host.lock() {
+                                *h = host;
+                            }
+                        }
+                    }
+                    SyncEvent::Disconnected { .. } | SyncEvent::RoomClosed { .. } => {
+                        my_session = None;
+                        if let Ok(mut h) = st.is_host.lock() {
+                            *h = false;
+                        }
+                    }
+                    _ => {}
                 }
             }
             // Only permanent disconnect ends the event pump (user leave / room gone).
@@ -99,13 +123,25 @@ fn send_msg(state: &AppState, msg: ClientMessage) -> Result<(), String> {
 
 /// Register local file on the hub and return share URL.
 async fn register_file(state: &AppState, path: PathBuf) -> Result<ServeInfo, String> {
-    let mut hub = state.hub.lock().await;
-    if hub.is_none() {
-        let started = MediaHub::start(DEFAULT_PORT, true)
-            .await
-            .map_err(|e| format!("{e:#}"))?;
-        *hub = Some(started);
+    // Build hub outside the async mutex — UPnP SSDP can take ~40s and must not
+    // block leave / create / join / stream_stop on the same lock.
+    {
+        let need_start = state.hub.lock().await.is_none();
+        if need_start {
+            let started = MediaHub::start(DEFAULT_PORT, true)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            let mut hub = state.hub.lock().await;
+            if hub.is_none() {
+                *hub = Some(started);
+            } else {
+                // Race: another task already installed a hub — drop ours.
+                drop(hub);
+                started.stop().await;
+            }
+        }
     }
+    let hub = state.hub.lock().await;
     hub.as_ref()
         .ok_or_else(|| "media hub not ready".to_string())?
         .add_file(path)
@@ -378,6 +414,28 @@ pub fn run() {
             ffmpeg_status,
             clear_media_cache,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Tear down media hub / UPnP on exit so the WAN port mapping
+            // does not outlive the process after a hard window close.
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if let Some(st) = app_handle.try_state::<AppState>() {
+                    if let Ok(mut g) = st.sync_shutdown.lock() {
+                        if let Some(tx) = g.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    // Best-effort: don't deadlock if hub lock held mid-start.
+                    if let Ok(mut g) = st.hub.try_lock() {
+                        if let Some(h) = g.take() {
+                            let _ = tauri::async_runtime::block_on(h.stop());
+                        }
+                    }
+                }
+            }
+        });
 }

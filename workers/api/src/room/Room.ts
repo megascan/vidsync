@@ -7,6 +7,7 @@ import {
   MAX_QUEUE_LENGTH,
   clientMessageSchema,
   emptyPlaybackState,
+  expectedPositionMs,
   isAllowedVideoUrl,
   normalizePlaybackState,
   type ClientMessage,
@@ -14,6 +15,11 @@ import {
   type PlaybackState,
   type ServerMessage,
 } from "@vidsync/shared";
+
+/** Debounce DO storage writes for lastActiveAtMs (10-min idle only needs coarse grain). */
+const TOUCH_PERSIST_MS = 60_000;
+/** Kick sockets that never completed hello (bypass MAX_MEMBERS otherwise). */
+const HELLO_TIMEOUT_MS = 30_000;
 
 type SessionAttachment = {
   sessionId: string;
@@ -42,6 +48,11 @@ type StoredRoom = {
   lastHostActivityAtMs: number;
   /** When designated host socket disappeared (null while host live). */
   hostGoneAtMs: number | null;
+  /**
+   * clientKey of the designated host process. Instant reclaim on reconnect
+   * only allowed when hello.clientKey matches (prevents peer steal during blip).
+   */
+  hostClientKey: string | null;
   state: PlaybackState;
 };
 
@@ -49,6 +60,8 @@ export class Room extends DurableObject<Env> {
   private sessions = new Map<WebSocket, SessionAttachment>();
   private room: StoredRoom | null = null;
   private lastHeartbeatBroadcastMs = 0;
+  /** Last time touch() wrote to storage (in-memory; resets on DO cold start). */
+  private lastTouchWriteMs = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -75,6 +88,9 @@ export class Room extends DurableObject<Env> {
         }
         if (stored.hostGoneAtMs === undefined) {
           stored.hostGoneAtMs = null;
+        }
+        if (stored.hostClientKey === undefined) {
+          stored.hostClientKey = null;
         }
         this.room = stored;
       } else {
@@ -115,29 +131,39 @@ export class Room extends DurableObject<Env> {
     }
 
     const now = Date.now();
-    if (!this.room) {
-      let state = emptyPlaybackState(now);
-      if (body.videoUrl && isAllowedVideoUrl(body.videoUrl)) {
-        state = {
-          ...state,
-          version: 1,
-          queue: [body.videoUrl],
-          queueIndex: 0,
-          videoUrl: body.videoUrl,
-          updatedAtMs: now,
-          serverAnchorMs: now,
-        };
-      }
-      this.room = {
-        code: body.code,
-        createdAtMs: now,
-        lastActiveAtMs: now,
-        lastHostActivityAtMs: now,
-        hostGoneAtMs: null,
-        state,
-      };
-      await this.persist();
+    // Collision: existing room must not silently merge two parties.
+    // Create path treats 409 as retry signal for a new code.
+    if (this.room) {
+      return Response.json(
+        { error: "room_exists", code: this.room.code },
+        { status: 409 },
+      );
     }
+
+    let state = emptyPlaybackState(now);
+    if (body.videoUrl && isAllowedVideoUrl(body.videoUrl)) {
+      state = {
+        ...state,
+        version: 1,
+        queue: [body.videoUrl],
+        queueIndex: 0,
+        videoUrl: body.videoUrl,
+        updatedAtMs: now,
+        serverAnchorMs: now,
+      };
+    }
+    this.room = {
+      code: body.code,
+      createdAtMs: now,
+      lastActiveAtMs: now,
+      lastHostActivityAtMs: now,
+      hostGoneAtMs: null,
+      hostClientKey: null,
+      state,
+    };
+    await this.persist();
+    // Arm empty-room wipe even if nobody ever joins (orphan DO storage).
+    await this.scheduleMaintenanceAlarm();
 
     return Response.json({
       code: this.room.code,
@@ -188,6 +214,8 @@ export class Room extends DurableObject<Env> {
     this.sessions.set(server, attachment);
 
     void this.touch();
+    // Arm hello-timeout sweep for silent sockets.
+    void this.scheduleMaintenanceAlarm();
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -289,6 +317,9 @@ export class Room extends DurableObject<Env> {
     this.rebuildSessionsFromHibernation();
     const now = Date.now();
 
+    // Kick silent pre-hello sockets (open WS, never join — bypass member cap).
+    await this.kickStaleHellos(now);
+
     // ——— Empty room: only wipe when NO sockets for a long grace ———
     if (this.openConnectionCount() === 0) {
       if (!this.room) {
@@ -378,24 +409,44 @@ export class Room extends DurableObject<Env> {
       // Pre-clientKey ghosts (or failed attachment): same nick + platform, no key
       await this.kickOrphanNickTwins(ws, session);
 
-      // Claim host if none / dead host (reconnect after DO drop).
+      // Claim host only when vacant or this process is the prior host (clientKey).
+      // Anyone else waits for HOST_RECLAIM_MS alarm promote — prevents peer steal
+      // when host WS blips and everyone reconnects with the same backoff.
       if (!this.room.state.hostSessionId || !this.isHostLive()) {
-        this.room.state = {
-          ...this.room.state,
-          hostSessionId: session.sessionId,
-          version: this.room.state.version + 1,
-          updatedAtMs: now,
-          serverAnchorMs: now,
-        };
-        this.room.lastHostActivityAtMs = now;
-        this.room.hostGoneAtMs = null;
-        await this.persist();
+        const sameHostProcess =
+          !!session.clientKey &&
+          !!this.room.hostClientKey &&
+          session.clientKey === this.room.hostClientKey;
+        const vacant = !this.room.state.hostSessionId;
+        if (vacant || sameHostProcess) {
+          // Extrapolate playing timeline before re-anchoring so reconnect
+          // does not rewind the whole room by the outage duration.
+          const positionMs = expectedPositionMs(this.room.state, now);
+          this.room.state = {
+            ...this.room.state,
+            hostSessionId: session.sessionId,
+            positionMs,
+            version: this.room.state.version + 1,
+            updatedAtMs: now,
+            serverAnchorMs: now,
+          };
+          if (session.clientKey) {
+            this.room.hostClientKey = session.clientKey;
+          }
+          this.room.lastHostActivityAtMs = now;
+          this.room.hostGoneAtMs = null;
+          await this.persist();
+        }
+        // else: host gone but different clientKey — stay follower until alarm
       }
 
       const isHost = this.room.state.hostSessionId === session.sessionId;
       if (isHost) {
         this.room.lastHostActivityAtMs = now;
         this.room.hostGoneAtMs = null;
+        if (session.clientKey) {
+          this.room.hostClientKey = session.clientKey;
+        }
         await this.persist();
       }
 
@@ -532,6 +583,7 @@ export class Room extends DurableObject<Env> {
         updatedAtMs: now,
       };
       this.room.lastHostActivityAtMs = now;
+      this.room.hostClientKey = target.clientKey ?? null;
       await this.persist();
       this.broadcastState();
       this.broadcastMembers();
@@ -668,8 +720,9 @@ export class Room extends DurableObject<Env> {
           serverAnchorMs: now,
           updatedAtMs: now,
         };
+        this.room.lastHostActivityAtMs = now;
         const since = now - this.lastHeartbeatBroadcastMs;
-        // Broadcast about every 8s for follower drift correction
+        // Broadcast about every 8s for follower drift correction (+ single persist)
         if (since >= 8000) {
           this.room.state = {
             ...this.room.state,
@@ -678,12 +731,8 @@ export class Room extends DurableObject<Env> {
           this.lastHeartbeatBroadcastMs = now;
           await this.persist();
           this.broadcastState();
-        } else {
-          // Persist less often — every other heartbeat path still touches activity
-          if (since >= 2000) {
-            await this.persist();
-          }
         }
+        // No mid-interval full-room persist — touch() debounces lastActiveAtMs.
         await this.touch();
         await this.scheduleMaintenanceAlarm();
         return;
@@ -1112,20 +1161,45 @@ export class Room extends DurableObject<Env> {
     if (this.room.state.hostSessionId === best.sessionId) {
       this.room.hostGoneAtMs = null;
       this.room.lastHostActivityAtMs = Date.now();
+      if (best.clientKey) this.room.hostClientKey = best.clientKey;
       await this.persist();
       return false;
     }
     const now = Date.now();
+    // Extrapolate before promote so new host doesn't inherit a frozen anchor.
+    const positionMs = expectedPositionMs(this.room.state, now);
     this.room.state = {
       ...this.room.state,
       hostSessionId: best.sessionId,
+      positionMs,
+      serverAnchorMs: now,
       version: this.room.state.version + 1,
       updatedAtMs: now,
     };
     this.room.lastHostActivityAtMs = now;
     this.room.hostGoneAtMs = null;
+    this.room.hostClientKey = best.clientKey ?? null;
     await this.persist();
     return true;
+  }
+
+  /** Close sockets that never completed hello within HELLO_TIMEOUT_MS. */
+  private async kickStaleHellos(now: number): Promise<void> {
+    const sockets = new Set<WebSocket>([
+      ...this.sessions.keys(),
+      ...this.ctx.getWebSockets(),
+    ]);
+    for (const ws of sockets) {
+      const att = this.sessions.get(ws) ?? this.attachmentOf(ws);
+      if (!att || att.helloDone) continue;
+      if (now - att.joinedAtMs < HELLO_TIMEOUT_MS) continue;
+      this.sessions.delete(ws);
+      try {
+        ws.close(4001, "hello_timeout");
+      } catch {
+        /* */
+      }
+    }
   }
 
   private async dissolveRoom(
@@ -1171,7 +1245,12 @@ export class Room extends DurableObject<Env> {
 
   private async touch(): Promise<void> {
     if (!this.room) return;
-    this.room.lastActiveAtMs = Date.now();
+    const now = Date.now();
+    this.room.lastActiveAtMs = now;
+    // lastActiveAtMs only matters at 10-min empty-grace granularity —
+    // writing full StoredRoom on every 2s ping is pure DO cost.
+    if (now - this.lastTouchWriteMs < TOUCH_PERSIST_MS) return;
+    this.lastTouchWriteMs = now;
     await this.persist();
   }
 
@@ -1219,6 +1298,9 @@ export class Room extends DurableObject<Env> {
       return;
     }
 
+    const pendingHello = this.hasPendingHello();
+    const helloSweepAt = pendingHello ? now + HELLO_TIMEOUT_MS : null;
+
     if (!this.isHostLive()) {
       const goneAt =
         this.room.hostGoneAtMs ?? this.room.lastHostActivityAtMs ?? now;
@@ -1226,11 +1308,29 @@ export class Room extends DurableObject<Env> {
         this.room.hostGoneAtMs = goneAt;
         await this.persist();
       }
-      await this.ctx.storage.setAlarm(goneAt + this.hostReclaimMs());
+      const reclaimAt = goneAt + this.hostReclaimMs();
+      const at =
+        helloSweepAt != null ? Math.min(reclaimAt, helloSweepAt) : reclaimAt;
+      await this.ctx.storage.setAlarm(at);
       return;
     }
 
-    // Occupied + host live → no maintenance timer (room stays)
+    // Occupied + host live → sweep silent hellos only when any exist
+    if (helloSweepAt != null) {
+      await this.ctx.storage.setAlarm(helloSweepAt);
+      return;
+    }
     await this.ctx.storage.deleteAlarm();
+  }
+
+  private hasPendingHello(): boolean {
+    for (const s of this.sessions.values()) {
+      if (!s.helloDone) return true;
+    }
+    for (const ws of this.ctx.getWebSockets()) {
+      const att = this.attachmentOf(ws);
+      if (att && !att.helloDone) return true;
+    }
+    return false;
   }
 }

@@ -7,7 +7,8 @@ export const MAX_VIDEO_URL_LENGTH = 2048;
 export const MAX_QUEUE_LENGTH = 50;
 export const MAX_CHAT_LENGTH = 280;
 /** Host should emit heartbeat this often while in a room (playing or not). */
-export const HOST_HEARTBEAT_MS = 5000;
+/** Host position heartbeats (desktop interval is 2s; DO broadcasts ~8s). */
+export const HOST_HEARTBEAT_MS = 2000;
 /**
  * After the last socket disconnects, wait this long before wiping storage.
  * Long on purpose — DO blips + reconnects should never race the wipe.
