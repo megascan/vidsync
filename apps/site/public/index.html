@@ -6,59 +6,73 @@
     <title>VidSync — watch together</title>
     <meta
       name="description"
-      content="VidSync is a desktop app for watching local videos together. Create a room, share a code, stay in sync."
+      content="Desktop app for watching local videos together. Host opens a file, share a room code, everyone stays in sync. Windows and Linux."
     />
+    <meta name="theme-color" content="#0c0d10" />
+    <meta property="og:title" content="VidSync — watch together" />
+    <meta
+      property="og:description"
+      content="Watch the same local file with friends. Host streams, room stays on the beat."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://vidsync.ratt.ing/" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="wrap">
       <header class="hero">
         <p class="logo">VidSync</p>
-        <h1>Watch together from your desktop</h1>
+        <h1>Watch the same file with friends</h1>
         <p class="lede">
-          Create a room, open a video file, share a code. Everyone stays on the
-          same beat — no browser tab, no extension.
+          Host opens a video and shares a room code. Peers join; playback
+          stays locked. Desktop app for Windows and Linux.
         </p>
+
+        <section class="downloads" aria-labelledby="get" aria-live="polite">
+          <h2 id="get" class="visually-hidden">Download</h2>
+
+          <a
+            class="btn-primary"
+            id="dl-primary"
+            href="#"
+            aria-disabled="true"
+            aria-busy="true"
+          >
+            <span class="btn-primary__label" data-label>Checking builds…</span>
+            <span class="btn-primary__meta" data-meta></span>
+          </a>
+
+          <p class="dl-secondary" id="dl-secondary-wrap" hidden>
+            <a id="dl-secondary" href="#" data-label>Other platform</a>
+            <span class="dl-secondary__meta" data-meta></span>
+          </p>
+
+          <div class="dl-extras" id="dl-extras" hidden></div>
+
+          <p class="version" id="version-line">Loading latest build…</p>
+        </section>
       </header>
 
-      <section class="downloads" aria-labelledby="get">
-        <h2 id="get" class="visually-hidden">Download</h2>
-        <div class="cards">
-          <a class="card" id="dl-windows" href="#" aria-disabled="true">
-            <span class="platform">Windows</span>
-            <span class="action" data-label>Installer</span>
-            <span class="meta" data-meta>Loading…</span>
-          </a>
-          <a class="card" id="dl-linux" href="#" aria-disabled="true">
-            <span class="platform">Linux</span>
-            <span class="action" data-label>AppImage</span>
-            <span class="meta" data-meta>Loading…</span>
-          </a>
-        </div>
-        <p class="version" id="version-line">Checking latest build…</p>
-      </section>
-
-      <section class="points">
-        <div class="point">
+      <section class="proof" aria-label="How it works">
+        <div class="proof__item">
           <h3>Local files</h3>
-          <p>Stream from your machine. Friends join with a short room code.</p>
+          <p>Host serves a file or URL from their machine. Nothing re-uploaded to us.</p>
         </div>
-        <div class="point">
-          <h3>Host controls</h3>
-          <p>Play, pause, seek, and queue stay in sync for the whole room.</p>
+        <div class="proof__item">
+          <h3>Room codes</h3>
+          <p>Six-character join. No accounts, no browser extension.</p>
         </div>
-        <div class="point">
-          <h3>Native app</h3>
-          <p>Windows and Linux builds. No website player, no CORS fights.</p>
+        <div class="proof__item">
+          <h3>Host sync</h3>
+          <p>Play, pause, seek, queue. Host leads; the room follows.</p>
         </div>
       </section>
 
       <footer class="foot">
         <p>
-          Open source on
           <a href="https://github.com/megascan/vidsync">GitHub</a>
-          · API
-          <a href="https://api.vidsync.ratt.ing/health">status</a>
+          <span class="foot__sep" aria-hidden="true">·</span>
+          <a href="https://api.vidsync.ratt.ing/health">API status</a>
         </p>
       </footer>
     </main>
