@@ -7,23 +7,13 @@ name: Desktop release
 on:
   push:
     branches: [master]
+    # GH allows only paths OR paths-ignore, not both.
+    # Include only trees that should trigger a full desktop rebuild.
     paths:
-      # Desktop app (UI + Rust)
       - "apps/desktop/**"
-      # Wire protocol / shared types used by desktop + DO
       - "packages/shared/**"
-      # Release packaging helpers (latest.json / updater.json)
       - "apps/site/scripts/**"
       - ".github/workflows/desktop-release.yml"
-    paths-ignore:
-      - "**/*.md"
-      - "DOCS/**"
-      - "apps/site/public/**"
-      - "apps/site/src/**"
-      - "apps/web/**"
-      - "apps/host/**"
-      - "extensions/**"
-      - "workers/**"
   workflow_dispatch:
 
 concurrency:
