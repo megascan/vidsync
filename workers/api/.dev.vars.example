@@ -1,0 +1,2 @@
+# Copy to .dev.vars (gitignored). Production: wrangler secret put TURNSTILE_SECRET_KEY
+TURNSTILE_SECRET_KEY=your-turnstile-secret-key

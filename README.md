@@ -30,7 +30,14 @@ Create a room on the home page, open the link in two browsers. Only the host can
 | Var | Where | Default |
 |---|---|---|
 | `PUBLIC_API_URL` | web | `http://localhost:8787` |
+| `PUBLIC_TURNSTILE_SITE_KEY` | web | site key (public) |
 | `WEB_ORIGIN` | worker | `http://localhost:4321` |
+| `TURNSTILE_SECRET_KEY` | worker `.dev.vars` / secret | required for create |
+
+Copy `workers/api/.dev.vars.example` → `.dev.vars` and set the Turnstile secret.  
+Production: `cd workers/api && bunx wrangler secret put TURNSTILE_SECRET_KEY`.
+
+Create room requires Cloudflare Turnstile. Join by code does not.
 
 ## CORS reality
 

@@ -5,6 +5,7 @@ import {
 import { generateRoomCode } from "./codes";
 import { corsHeaders, json } from "./cors";
 import { Room } from "./room/Room";
+import { verifyTurnstileToken } from "./turnstile";
 
 export { Room };
 
@@ -119,6 +120,38 @@ async function handleCreateRoom(
         message: body.error.issues[0]?.message ?? "Invalid body",
       },
       { status: 400, origin, allowedOrigin: allowed },
+    );
+  }
+
+  const secret = env.TURNSTILE_SECRET_KEY;
+  if (!secret) {
+    return json(
+      {
+        error: "misconfigured",
+        message: "Turnstile secret not configured",
+      },
+      { status: 503, origin, allowedOrigin: allowed },
+    );
+  }
+
+  const remoteIp =
+    request.headers.get("CF-Connecting-IP") ??
+    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ??
+    null;
+
+  const captcha = await verifyTurnstileToken({
+    secret,
+    token: body.data.turnstileToken,
+    remoteIp,
+  });
+  if (!captcha.ok) {
+    return json(
+      {
+        error: "captcha_failed",
+        message: "Captcha verification failed. Refresh and try again.",
+        codes: captcha.codes,
+      },
+      { status: 403, origin, allowedOrigin: allowed },
     );
   }
 

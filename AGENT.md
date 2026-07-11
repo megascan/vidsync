@@ -20,6 +20,8 @@ Anonymous watch-party: rooms sync raw video stream URLs.
 - `bun run dev:web` — Astro
 - `bun run dev:api` — wrangler dev (DO local)
 - `PUBLIC_API_URL` web, `WEB_ORIGIN` worker
+- Turnstile: `PUBLIC_TURNSTILE_SITE_KEY` (web), `TURNSTILE_SECRET_KEY` in `workers/api/.dev.vars` (never commit)
+- Create room requires captcha; join does not
 
 ## Room URL
 Pretty `/r/:code` needs host rewrite → `/room` (see DOCS/architecture.md).

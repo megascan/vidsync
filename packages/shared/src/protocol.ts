@@ -133,6 +133,8 @@ export type ServerMessage = z.infer<typeof serverMessageSchema>;
 
 export const createRoomBodySchema = z.object({
   videoUrl: videoUrlSchema.optional(),
+  /** Cloudflare Turnstile response token from the widget. */
+  turnstileToken: z.string().min(1).max(2048),
 });
 
 export type CreateRoomBody = z.infer<typeof createRoomBodySchema>;

@@ -11,14 +11,20 @@ export function wsUrlForRoom(code: string): string {
   return `${proto}//${u.host}/rooms/${code.toUpperCase()}/ws`;
 }
 
-export async function createRoom(videoUrl?: string): Promise<{
+export async function createRoom(opts: {
+  videoUrl?: string;
+  turnstileToken: string;
+}): Promise<{
   code: string;
   wsUrl: string;
 }> {
   const res = await fetch(`${apiBase()}/rooms`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(videoUrl ? { videoUrl } : {}),
+    body: JSON.stringify({
+      turnstileToken: opts.turnstileToken,
+      ...(opts.videoUrl ? { videoUrl: opts.videoUrl } : {}),
+    }),
   });
   if (!res.ok) {
     const err = (await res.json().catch(() => null)) as {

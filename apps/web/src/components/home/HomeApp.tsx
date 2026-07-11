@@ -1,13 +1,20 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { isAllowedVideoUrl } from "@vidsync/shared";
 import { createRoom } from "../../lib/api";
 import { isValidRoomCode, normalizeRoomCode } from "../../lib/roomCode";
+import Turnstile from "../Turnstile";
 
 export default function HomeApp() {
   const [videoUrl, setVideoUrl] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [captchaReset, setCaptchaReset] = useState(0);
+
+  const onToken = useCallback((token: string | null) => {
+    setTurnstileToken(token);
+  }, []);
 
   async function onCreate() {
     setError(null);
@@ -16,12 +23,21 @@ export default function HomeApp() {
       setError("Video URL must be public https (no localhost/private hosts).");
       return;
     }
+    if (!turnstileToken) {
+      setError("Complete the captcha first.");
+      return;
+    }
     setBusy(true);
     try {
-      const { code } = await createRoom(url || undefined);
+      const { code } = await createRoom({
+        videoUrl: url || undefined,
+        turnstileToken,
+      });
       window.location.href = `/r/${code}`;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create room");
+      setTurnstileToken(null);
+      setCaptchaReset((n) => n + 1);
     } finally {
       setBusy(false);
     }
@@ -51,9 +67,12 @@ export default function HomeApp() {
             className="mt-1 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
           />
         </label>
+
+        <Turnstile onToken={onToken} resetKey={captchaReset} />
+
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || !turnstileToken}
           onClick={() => void onCreate()}
           className="mt-3 w-full rounded-md bg-[var(--color-accent)] px-3 py-2 text-sm font-semibold text-black disabled:opacity-50"
         >

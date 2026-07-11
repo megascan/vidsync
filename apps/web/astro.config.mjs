@@ -30,6 +30,12 @@ export default defineConfig({
         access: "public",
         default: "http://localhost:8787",
       }),
+      PUBLIC_TURNSTILE_SITE_KEY: envField.string({
+        context: "client",
+        access: "public",
+        default: "0x4AAAAAADzlwOrzRgjSqYdm",
+      }),
     },
   },
 });
+

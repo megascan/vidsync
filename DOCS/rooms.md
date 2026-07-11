@@ -1,6 +1,7 @@
 # Rooms
 
-- Created anonymously via `POST /rooms` `{ videoUrl?: string }`
+- Created anonymously via `POST /rooms` `{ videoUrl?: string, turnstileToken: string }`
+- Turnstile: client widget (`PUBLIC_TURNSTILE_SITE_KEY`) → Worker verifies with `TURNSTILE_SECRET_KEY` via siteverify before DO init
 - Code is public share secret (treat like unlisted link)
 - Idle GC: DO alarm after 24h with no connections
 - Host = first joiner; transfer on disconnect to oldest remaining
