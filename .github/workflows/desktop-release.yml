@@ -73,6 +73,14 @@ jobs:
         working-directory: apps/desktop
         run: bun install
 
+      # Monotonic version for this workflow run (same on win+linux matrix).
+      # Writes package.json + Cargo.toml + tauri.conf.json before tauri build.
+      - name: Sync release version
+        working-directory: apps/desktop
+        run: node scripts/sync-version.mjs --ci
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+
       - name: Build Tauri (signed updater artifacts)
         working-directory: apps/desktop
         run: bunx tauri build
@@ -86,6 +94,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-out | Out-Null
+          $ver = (Get-Content apps/desktop/package.json -Raw | ConvertFrom-Json).version
+          Set-Content -Path dist-out/VERSION -Value $ver -NoNewline
           $nsisDir = "apps/desktop/src-tauri/target/release/bundle/nsis"
           $msiDir = "apps/desktop/src-tauri/target/release/bundle/msi"
           $nsis = Get-ChildItem -Path $nsisDir -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -108,6 +118,7 @@ jobs:
         if: matrix.os_name == 'linux'
         run: |
           mkdir -p dist-out
+          node -p "require('./apps/desktop/package.json').version" > dist-out/VERSION
           APPIMAGE=$(find apps/desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' 2>/dev/null | head -n1 || true)
           DEB=$(find apps/desktop/src-tauri/target/release/bundle/deb -name '*.deb' 2>/dev/null | head -n1 || true)
           BIN="apps/desktop/src-tauri/target/release/vidsync-desktop"
@@ -164,8 +175,16 @@ jobs:
           COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./apps/desktop/package.json').version")
+          # Prefer version baked into the build (CI bump), not clean checkout package.json
+          if [ -f artifacts/windows/VERSION ]; then
+            VERSION=$(tr -d '[:space:]' < artifacts/windows/VERSION)
+          elif [ -f artifacts/linux/VERSION ]; then
+            VERSION=$(tr -d '[:space:]' < artifacts/linux/VERSION)
+          else
+            VERSION=$(node -p "require('./apps/desktop/package.json').version")
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release version: $VERSION"
           mkdir -p stage/downloads/windows stage/downloads/linux
 
           # Versioned keys only — same-path overwrite + Workers Cache was serving

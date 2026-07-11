@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -105,6 +106,8 @@ type UpdateUi =
 let updateUi: UpdateUi = { phase: "idle" };
 let pendingUpdate: Update | null = null;
 let updateBusy = false;
+/** Installed app version (from Tauri), shown on home + used to filter false updates. */
+let appVersion = "";
 
 const video = document.createElement("video");
 video.playsInline = true;
@@ -705,10 +708,47 @@ function shortUrl(u: string): string {
   }
 }
 
+/** Semver compare: a > b → 1, a < b → -1, equal → 0. Strips leading v. */
+function cmpSemver(a: string, b: string): number {
+  const parse = (s: string) =>
+    s
+      .replace(/^v/i, "")
+      .split(/[.+-]/)
+      .map((p) => {
+        const n = Number(p);
+        return Number.isFinite(n) ? n : 0;
+      });
+  const aa = parse(a);
+  const bb = parse(b);
+  const len = Math.max(aa.length, bb.length);
+  for (let i = 0; i < len; i++) {
+    const d = (aa[i] ?? 0) - (bb[i] ?? 0);
+    if (d > 0) return 1;
+    if (d < 0) return -1;
+  }
+  return 0;
+}
+
 async function checkForUpdates() {
   try {
+    if (!appVersion) {
+      try {
+        appVersion = await getVersion();
+      } catch {
+        appVersion = "";
+      }
+    }
     const update = await check();
     if (!update) {
+      updateUi = { phase: "idle" };
+      pendingUpdate = null;
+      return;
+    }
+    // Guard: never prompt if remote is not strictly newer (stale manifest / re-check after install)
+    if (appVersion && cmpSemver(update.version, appVersion) <= 0) {
+      console.info(
+        `skip update: remote ${update.version} <= installed ${appVersion}`,
+      );
       updateUi = { phase: "idle" };
       pendingUpdate = null;
       return;
@@ -911,6 +951,11 @@ function paint() {
           <div class="brand">
             <h1 class="brand-mark">VidSync</h1>
             <p class="brand-tag">Watch together. One room, one stream.</p>
+            ${
+              appVersion
+                ? `<p class="brand-ver">v${escapeHtml(appVersion)}</p>`
+                : ""
+            }
           </div>
           <div class="stack">
             <label class="field">
@@ -1115,6 +1160,11 @@ async function boot() {
     apiBase = await invoke<string>("default_api");
   } catch {
     apiBase = DEFAULT_API;
+  }
+  try {
+    appVersion = await getVersion();
+  } catch {
+    appVersion = "";
   }
   await listen("sync-event", (e) => {
     void onSync(e.payload);

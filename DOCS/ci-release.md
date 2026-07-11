@@ -133,6 +133,22 @@ Built by `apps/site/scripts/make-updater.mjs` in CI.
 On launch, desktop calls `@tauri-apps/plugin-updater` `check()` against `/updater.json`.
 If remote version > installed, banner: **Install & restart** → download + verify signature → install → relaunch.
 
+## Versioning
+
+Each CI build runs `apps/desktop/scripts/sync-version.mjs --ci` before `tauri build`:
+
+- Reads base from `package.json` (e.g. `0.1.3`)
+- Sets release version to `0.1.max(patch+1, GITHUB_RUN_NUMBER)`
+- Writes the same value into `package.json`, `Cargo.toml`, `tauri.conf.json`
+- Publish stages use that baked `VERSION` file (not the clean checkout)
+
+So every successful release is a **new, higher** semver. Local dev keeps committed `package.json` until you run:
+
+```bash
+cd apps/desktop
+node scripts/sync-version.mjs --set 0.2.0
+```
+
 ## Manual run
 
 Actions → **Desktop release** → Run workflow.

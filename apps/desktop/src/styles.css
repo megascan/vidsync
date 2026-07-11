@@ -200,6 +200,14 @@ input:disabled {
   font-size: 0.92rem;
 }
 
+.brand-ver {
+  margin: 0.15rem 0 0;
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  color: var(--faint);
+  letter-spacing: 0.02em;
+}
+
 .stack {
   display: flex;
   flex-direction: column;
