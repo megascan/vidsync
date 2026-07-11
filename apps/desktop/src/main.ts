@@ -448,19 +448,57 @@ function ensureVideoMounted() {
  * Hard-reset media element. Always detach-safe: never leave WebKit mid-decode
  * under a parent about to be wiped by paint().
  */
+function mediaMimeFromUrl(url: string): string {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    const ext = p.includes(".") ? p.slice(p.lastIndexOf(".") + 1) : "";
+    const map: Record<string, string> = {
+      mp4: "video/mp4",
+      m4v: "video/mp4",
+      mov: "video/mp4",
+      webm: "video/webm",
+      mkv: "video/x-matroska",
+      avi: "video/x-msvideo",
+      wmv: "video/x-ms-wmv",
+      flv: "video/x-flv",
+      ts: "video/mp2t",
+      m2ts: "video/mp2t",
+      mts: "video/mp2t",
+      mpg: "video/mpeg",
+      mpeg: "video/mpeg",
+      ogv: "video/ogg",
+      "3gp": "video/3gpp",
+      mp3: "audio/mpeg",
+      m4a: "audio/mp4",
+      aac: "audio/aac",
+      wav: "audio/wav",
+      flac: "audio/flac",
+      ogg: "audio/ogg",
+      oga: "audio/ogg",
+      opus: "audio/opus",
+      wma: "audio/x-ms-wma",
+      weba: "audio/webm",
+      aiff: "audio/aiff",
+      aif: "audio/aiff",
+    };
+    return map[ext] ?? "application/octet-stream";
+  } catch {
+    return "application/octet-stream";
+  }
+}
+
 function mediaErrorMessage(): string {
   const err = video.error;
   if (!err) return "Couldn't load the host stream";
-  // MEDIA_ERR_* codes
   switch (err.code) {
     case 1:
       return "Playback aborted";
     case 2:
       return "Network error loading stream (firewall / host offline / bad URL)";
     case 3:
-      return "Decode error — Linux WebKit may not like this file (try remux: ffmpeg -i in.mp4 -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart out.mp4)";
+      return "Decode error — try Settings → FFmpeg prepare, or remux to mp4/webm";
     case 4:
-      return "Format not supported by this system's media stack (need H.264+AAC in .mp4 for Linux)";
+      return "Format not supported by this system WebView — try another file or enable FFmpeg transcode";
     default:
       return `Media error ${err.code}${err.message ? `: ${err.message}` : ""}`;
   }
@@ -487,19 +525,7 @@ async function loadVideoSrc(url: string): Promise<void> {
 
   const source = document.createElement("source");
   source.src = url;
-  const ext = (() => {
-    try {
-      const p = new URL(url).pathname.toLowerCase();
-      if (p.endsWith(".webm")) return "video/webm";
-      if (p.endsWith(".mkv")) return "video/x-matroska";
-      if (p.endsWith(".mp4") || p.endsWith(".m4v") || p.endsWith(".mov"))
-        return "video/mp4";
-    } catch {
-      /* */
-    }
-    return "video/mp4";
-  })();
-  source.type = ext;
+  source.type = mediaMimeFromUrl(url);
   video.appendChild(source);
   video.load();
 
@@ -895,9 +921,52 @@ async function pickVideoFile(): Promise<string | null> {
     multiple: false,
     filters: [
       {
-        name: "Video",
-        extensions: ["mp4", "webm", "mkv", "mov", "m4v", "avi", "ts"],
+        name: "Media",
+        extensions: [
+          // video
+          "mp4",
+          "m4v",
+          "webm",
+          "mkv",
+          "mov",
+          "avi",
+          "wmv",
+          "flv",
+          "f4v",
+          "mpg",
+          "mpeg",
+          "mpe",
+          "mp2",
+          "m2v",
+          "ts",
+          "m2ts",
+          "mts",
+          "vob",
+          "ogv",
+          "3gp",
+          "3g2",
+          "asf",
+          "rm",
+          "rmvb",
+          "divx",
+          // audio
+          "mp3",
+          "m4a",
+          "aac",
+          "wav",
+          "flac",
+          "ogg",
+          "oga",
+          "opus",
+          "wma",
+          "aiff",
+          "aif",
+          "alac",
+          "caf",
+          "weba",
+        ],
       },
+      { name: "All files", extensions: ["*"] },
     ],
   });
   if (!selected || typeof selected !== "string") return null;
@@ -1517,11 +1586,11 @@ function paint() {
   const emptyCopy = isHost
     ? {
         title: "Nothing playing",
-        body: "Open a video file to start the room.",
+        body: "Open a video or audio file to start the room.",
       }
     : {
         title: "Waiting for host",
-        body: "Video shows up here when they start streaming.",
+        body: "Media shows up here when they start streaming.",
       };
 
   const flashBar = error
@@ -1569,7 +1638,7 @@ function paint() {
             ${
               isHost
                 ? `
-              <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>Play file…</button>
+              <button type="button" class="primary" id="stream" ${busy ? "disabled" : ""}>Play media…</button>
               <button type="button" id="queueAdd" ${busy ? "disabled" : ""}>Add to queue</button>
               <button type="button" id="play" ${!media || busy ? "disabled" : ""}>Play</button>
               <button type="button" id="pause" ${!media || busy ? "disabled" : ""}>Pause</button>

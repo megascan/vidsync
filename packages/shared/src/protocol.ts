@@ -41,8 +41,9 @@ export const nicknameSchema = z
   .transform((s) => s.replace(/[\u0000-\u001f\u007f]/g, ""));
 
 /**
- * Stream URLs: http(s) only. Localhost / LAN / private hosts allowed
- * (home NAS, local media servers). Blocks non-http schemes.
+ * Stream URLs: http(s) only (video or audio). Localhost / LAN / private hosts
+ * allowed (home NAS, host media hub). Blocks non-http schemes.
+ * No file-extension allowlist — host may share any playable media.
  */
 export function isAllowedVideoUrl(raw: string): boolean {
   if (raw.length === 0 || raw.length > MAX_VIDEO_URL_LENGTH) return false;
@@ -61,7 +62,7 @@ export const videoUrlSchema = z
   .string()
   .max(MAX_VIDEO_URL_LENGTH)
   .refine(isAllowedVideoUrl, {
-    message: "Video URL must be http(s) (e.g. https://… or http://localhost/…).",
+    message: "Media URL must be http(s) (e.g. https://… or http://host:port/…).",
   });
 
 export const playbackStateSchema = z.object({

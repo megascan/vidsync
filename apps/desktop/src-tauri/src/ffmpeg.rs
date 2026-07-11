@@ -238,22 +238,28 @@ fn decide_auto(probe: &Probe, path: &Path) -> PrepareKind {
     let pix = probe.pix_fmt.as_deref().unwrap_or("");
     let fmt = probe.format_name.as_deref().unwrap_or("");
 
+    // Audio-only: leave as-is unless forced remux/transcode mode
+    if v.is_empty() && !a.is_empty() {
+        return PrepareKind::None;
+    }
+
     let h264 = matches!(v, "h264" | "avc1" | "avc");
-    let aac_ok = a.is_empty() || matches!(a, "aac" | "mp4a");
+    let aac_ok = a.is_empty() || matches!(a, "aac" | "mp4a" | "mp3");
     let pix_ok = pix.is_empty() || pix == "yuv420p";
     let mp4ish = matches!(ext.as_str(), "mp4" | "m4v" | "mov")
         || fmt.contains("mp4")
         || fmt.contains("mov")
         || fmt.contains("ism");
 
+    if v.is_empty() {
+        return PrepareKind::None;
+    }
+
     if !h264 || !aac_ok || !pix_ok {
-        if v.is_empty() {
-            return PrepareKind::None;
-        }
         return PrepareKind::Transcode;
     }
 
-    // H.264 + AAC + yuv420p: remux only if container/extra tracks need cleanup
+    // H.264 + AAC/MP3 + yuv420p: remux only if container/extra tracks need cleanup
     if mp4ish && probe.extra_streams == 0 {
         PrepareKind::None
     } else {

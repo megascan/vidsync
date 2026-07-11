@@ -38,18 +38,34 @@ pub fn random_token() -> String {
 }
 
 pub fn guess_mime(path: &Path) -> String {
-    // Prefer extension map — WebKitGTK/GStreamer is picky; never serve video as octet-stream.
+    // Prefer extension map — WebKitGTK/GStreamer sniffs type from path + Content-Type.
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         match ext.to_ascii_lowercase().as_str() {
-            "mp4" | "m4v" | "mov" => return "video/mp4".into(),
+            // video
+            "mp4" | "m4v" | "mov" | "f4v" => return "video/mp4".into(),
             "webm" => return "video/webm".into(),
-            "mkv" => return "video/x-matroska".into(),
-            "ts" | "m2ts" => return "video/mp2t".into(),
+            "mkv" | "mk3d" => return "video/x-matroska".into(),
+            "ts" | "m2ts" | "mts" => return "video/mp2t".into(),
             "avi" => return "video/x-msvideo".into(),
-            "mp3" => return "audio/mpeg".into(),
-            "m4a" => return "audio/mp4".into(),
+            "wmv" | "asf" => return "video/x-ms-wmv".into(),
+            "flv" => return "video/x-flv".into(),
+            "mpg" | "mpeg" | "mpe" | "m2v" => return "video/mpeg".into(),
+            "ogv" => return "video/ogg".into(),
+            "3gp" => return "video/3gpp".into(),
+            "3g2" => return "video/3gpp2".into(),
+            "vob" => return "video/mpeg".into(),
+            // audio
+            "mp3" | "mp2" => return "audio/mpeg".into(),
+            "m4a" | "alac" => return "audio/mp4".into(),
+            "aac" => return "audio/aac".into(),
+            "wav" | "wave" => return "audio/wav".into(),
+            "flac" => return "audio/flac".into(),
             "ogg" | "oga" => return "audio/ogg".into(),
-            "wav" => return "audio/wav".into(),
+            "opus" => return "audio/opus".into(),
+            "wma" => return "audio/x-ms-wma".into(),
+            "aiff" | "aif" => return "audio/aiff".into(),
+            "weba" => return "audio/webm".into(),
+            "caf" => return "audio/x-caf".into(),
             _ => {}
         }
     }
@@ -64,7 +80,7 @@ pub fn url_file_name(file_name: &str) -> String {
     let base = file_name
         .rsplit(['/', '\\'])
         .next()
-        .unwrap_or("video.mp4");
+        .unwrap_or("media.bin");
     let mut out = String::with_capacity(base.len());
     for c in base.chars() {
         if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
@@ -72,11 +88,11 @@ pub fn url_file_name(file_name: &str) -> String {
         }
     }
     if out.is_empty() {
-        return "video.mp4".into();
+        return "media.bin".into();
     }
-    // Ensure an extension so GStreamer/WebKit can pick a demuxer from the path
+    // Keep real extension when present; don't force .mp4 on audio-only names
     if !out.contains('.') {
-        out.push_str(".mp4");
+        out.push_str(".bin");
     }
     out
 }
