@@ -1,7 +1,7 @@
 {
   "name": "vidsync",
   "private": true,
-  "workspaces": ["apps/*", "workers/*", "packages/*"],
+  "workspaces": ["apps/*", "workers/*", "packages/*", "extensions/*"],
   "scripts": {
     "dev:web": "bun run --filter @vidsync/web dev",
     "dev:api": "bun run --filter @vidsync/api dev",

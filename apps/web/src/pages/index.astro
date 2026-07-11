@@ -23,9 +23,15 @@ import HomeApp from "../components/home/HomeApp";
     <aside
       class="mt-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs leading-relaxed text-[var(--color-muted)]"
     >
-      <strong class="text-[var(--color-text)]">CORS note:</strong>
-      Your browser loads the media URL directly. The host must allow cross-origin
-      playback (and Range for progressive files). VidSync does not proxy video bytes.
+      <strong class="text-[var(--color-text)]">CORS:</strong>
+      Browsers load media URLs directly — VidSync does not proxy bytes. Stubborn
+      streams: optional
+      <a
+        class="text-[var(--color-accent)] underline-offset-2 hover:underline"
+        href="https://github.com/megascan/vidsync/tree/master/extensions/vidsync-unblock"
+        >VidSync Unblock</a
+      >
+      extension (fetch without page CORS; still must reach the URL).
     </aside>
   </main>
 </BaseLayout>

@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "VidSync Unblock",
+  "version": "1.0.0",
+  "description": "Optional helper for VidSync: fetch media without CORS so watch rooms can play stubborn streams. Only runs on VidSync.",
+  "permissions": ["storage"],
+  "host_permissions": ["*://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://vidsync.ratt.ing/*",
+        "http://localhost:4321/*",
+        "http://127.0.0.1:4321/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "VidSync Unblock",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

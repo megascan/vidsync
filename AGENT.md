@@ -11,8 +11,8 @@ Anonymous watch-party: rooms sync raw video stream URLs.
 - bun workspaces. TypeScript strict. No `any`.
 - Frontend/backend always separate. No Astro CF adapter (static only).
 - Host-authoritative sync. One DO per room code (`getByName`).
-- HTTPS video URLs only. No media proxy MVP — client CORS is user problem.
-- No auth MVP. No chat MVP.
+- Video: http(s) URLs (LAN ok). No CF media proxy — optional `extensions/vidsync-unblock`.
+- No auth MVP.
 - Document decisions in `DOCS/`. Debt in `TECH_DEBT.md`.
 - Public copy → de-slop before ship.
 
@@ -25,4 +25,7 @@ Anonymous watch-party: rooms sync raw video stream URLs.
 - Create room requires captcha; join does not
 
 ## Room URL
-Pretty `/r/:code` needs host rewrite → `/room` (see DOCS/architecture.md).
+Pretty `/r/:code` via `apps/web/src/asset-worker.ts` (see DOCS/architecture.md).
+
+## Extension
+`extensions/vidsync-unblock` — MV3, load unpacked. Bridge: `apps/web/src/lib/unblock/`.

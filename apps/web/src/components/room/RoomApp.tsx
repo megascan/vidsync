@@ -19,6 +19,7 @@ import {
 import { parseRoomCodeFromLocation } from "../../lib/roomCode";
 import { applyDrift, SyncClient } from "../../lib/sync/client";
 import { useRoomStore } from "../../lib/store/roomStore";
+import UnblockStatus from "./UnblockStatus";
 
 function formatTime(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -438,6 +439,7 @@ export default function RoomApp() {
               </span>
             )}
             <ConnBadge conn={conn} />
+            <UnblockStatus />
           </div>
         </div>
         <div className="flex gap-2">
